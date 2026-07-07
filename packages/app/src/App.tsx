@@ -1,91 +1,207 @@
-import { useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
-  ArrowUpRight,
+  AlertTriangle,
   CheckCircle2,
-  FolderOpen,
+  ChevronDown,
+  ChevronRight,
+  CircleSlash,
+  HardDrive,
+  Loader2,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   Trash2,
 } from "lucide-react";
 
 import mark from "./assets/clarus-mark.svg";
+import {
+  cleanItem,
+  cleanTarget,
+  onTargetMeasured,
+  scanCleanupTargets,
+} from "./cleanup/api";
+import {
+  isTargetActionable,
+  STATUS_LABELS,
+  TIER_LABELS,
+  type CleanResult,
+  type CleanupItem,
+  type CleanupTarget,
+  type Status,
+  type Tier,
+} from "./cleanup/types";
 import { formatBytes } from "./format";
-import { scanDirectory } from "./scan/api";
-import type { ScanCandidate, ScanSummary } from "./scan/types";
 import { useUpdater } from "./platform/updater/useUpdater";
 
-const kindLabels: Record<ScanCandidate["kind"], string> = {
-  cache: "Cache",
-  temporary: "Temporary",
-  log: "Log",
-  "large-file": "Large file",
-  "empty-directory": "Empty directory",
+type ScanState = "idle" | "scanning" | "complete" | "error";
+
+type ActionPhase = "idle" | "cleaning" | "done" | "error";
+type ActionState = { phase: ActionPhase; freedGb?: number; message?: string };
+
+type ConfirmRequest = {
+  key: string;
+  title: string;
+  command: string;
+  run: () => Promise<void>;
 };
 
-function emptySummary(): ScanSummary {
-  return {
-    root: "",
-    scannedFiles: 0,
-    scannedDirectories: 0,
-    totalBytes: 0,
-    candidateBytes: 0,
-    candidates: [],
-  };
+const TIER_ORDER: Tier[] = ["one", "two", "three"];
+
+function targetKey(id: string) {
+  return `t:${id}`;
+}
+function itemKey(targetId: string, itemId: string) {
+  return `i:${targetId}:${itemId}`;
 }
 
 export function App() {
-  const [rootPath, setRootPath] = useState("");
-  const [summary, setSummary] = useState<ScanSummary>(emptySummary);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [status, setStatus] = useState<
-    "idle" | "scanning" | "complete" | "error"
-  >("idle");
+  const [scanState, setScanState] = useState<ScanState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [targets, setTargets] = useState<CleanupTarget[]>([]);
+  const [measured, setMeasured] = useState(0);
+
+  const [freeBefore, setFreeBefore] = useState<number | null>(null);
+  const [freeBeforeHuman, setFreeBeforeHuman] = useState<string>("—");
+  const [freeNow, setFreeNow] = useState<number | null>(null);
+  const [freeNowHuman, setFreeNowHuman] = useState<string>("—");
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [actions, setActions] = useState<Record<string, ActionState>>({});
+  const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+
   const updater = useUpdater();
+  const unlistenRef = useRef<null | (() => void)>(null);
+
+  useEffect(() => () => unlistenRef.current?.(), []);
 
   const selected = useMemo(
-    () =>
-      summary.candidates.find((candidate) => candidate.id === selectedId) ??
-      summary.candidates[0],
-    [selectedId, summary.candidates],
+    () => targets.find((t) => t.id === selectedId) ?? null,
+    [selectedId, targets],
   );
 
-  const categoryTotals = useMemo(() => {
-    const totals = new Map<ScanCandidate["kind"], number>();
-    for (const candidate of summary.candidates) {
-      totals.set(
-        candidate.kind,
-        (totals.get(candidate.kind) ?? 0) + candidate.sizeBytes,
-      );
-    }
-    return [...totals.entries()].sort((a, b) => b[1] - a[1]);
-  }, [summary.candidates]);
+  const grouped = useMemo(() => {
+    const map: Record<Tier, CleanupTarget[]> = { one: [], two: [], three: [] };
+    for (const t of targets) map[t.tier].push(t);
+    return map;
+  }, [targets]);
 
-  async function chooseFolder() {
-    const selectedPath = await open({ directory: true, multiple: false });
-    if (typeof selectedPath !== "string") return;
-    setRootPath(selectedPath);
-    setStatus("idle");
-    setError(null);
-  }
+  const freedTotal =
+    freeNow !== null && freeBefore !== null ? freeNow - freeBefore : 0;
 
   async function runScan() {
-    if (!rootPath) return;
-    setStatus("scanning");
+    setScanState("scanning");
     setError(null);
+    setTargets([]);
+    setMeasured(0);
+    setActions({});
+
+    unlistenRef.current?.();
+    const unlisten = await onTargetMeasured((target) => {
+      setMeasured((n) => n + 1);
+      setTargets((prev) => {
+        const idx = prev.findIndex((t) => t.id === target.id);
+        const next = idx === -1 ? [...prev, target] : prev.slice();
+        if (idx !== -1) next[idx] = target;
+        return sortTargets(next);
+      });
+    });
+    unlistenRef.current = unlisten;
+
     try {
-      const result = await scanDirectory(rootPath);
-      setSummary(result);
-      setSelectedId(result.candidates[0]?.id ?? null);
-      setStatus("complete");
+      const scan = await scanCleanupTargets();
+      setTargets(sortTargets(scan.targets));
+      setFreeBefore(scan.freeBeforeGb);
+      setFreeBeforeHuman(scan.freeBeforeHuman);
+      setFreeNow(scan.freeBeforeGb);
+      setFreeNowHuman(scan.freeBeforeHuman);
+      setSelectedId((prev) => prev ?? scan.targets[0]?.id ?? null);
+      setScanState("complete");
     } catch (err) {
       setError(String(err));
-      setStatus("error");
+      setScanState("error");
+    } finally {
+      unlisten();
+      unlistenRef.current = null;
     }
   }
+
+  function applyResult(key: string, result: CleanResult) {
+    setFreeNow(result.freeGb);
+    setFreeNowHuman(result.freeHuman);
+    setActions((prev) => ({
+      ...prev,
+      [key]: result.ok
+        ? { phase: "done", freedGb: result.freedGb }
+        : { phase: "error", message: result.message ?? "Cleanup failed" },
+    }));
+  }
+
+  async function execTarget(target: CleanupTarget) {
+    const key = targetKey(target.id);
+    setActions((p) => ({ ...p, [key]: { phase: "cleaning" } }));
+    try {
+      applyResult(key, await cleanTarget(target.id, true));
+    } catch (err) {
+      setActions((p) => ({
+        ...p,
+        [key]: { phase: "error", message: String(err) },
+      }));
+    }
+  }
+
+  async function execItem(target: CleanupTarget, item: CleanupItem) {
+    const key = itemKey(target.id, item.id);
+    setActions((p) => ({ ...p, [key]: { phase: "cleaning" } }));
+    try {
+      applyResult(key, await cleanItem(target.id, item.id, true));
+    } catch (err) {
+      setActions((p) => ({
+        ...p,
+        [key]: { phase: "error", message: String(err) },
+      }));
+    }
+  }
+
+  function handleTarget(target: CleanupTarget) {
+    if (target.requiresDoubleConfirm) {
+      setConfirmReq({
+        key: targetKey(target.id),
+        title: target.name,
+        command: target.command ?? "",
+        run: () => execTarget(target),
+      });
+    } else {
+      void execTarget(target);
+    }
+  }
+
+  function handleItem(target: CleanupTarget, item: CleanupItem) {
+    if (item.requiresDoubleConfirm) {
+      setConfirmReq({
+        key: itemKey(target.id, item.id),
+        title: `${target.name} — ${item.label}`,
+        command: item.command,
+        run: () => execItem(target, item),
+      });
+    } else {
+      void execItem(target, item);
+    }
+  }
+
+  function toggleExpand(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  const busy = scanState === "scanning";
 
   return (
     <main className="app-shell">
@@ -94,35 +210,55 @@ export function App() {
           <img src={mark} alt="" className="brand-mark" />
           <div>
             <p className="eyebrow">Clarus</p>
-            <h1>Disk intelligence</h1>
+            <h1>Disk cleanup</h1>
           </div>
         </div>
 
         <section className="rail-section">
-          <p className="section-label">Scope</p>
-          <button
-            className="primary-action"
-            type="button"
-            onClick={chooseFolder}
-          >
-            <FolderOpen size={17} />
-            Select folder
-          </button>
-          <div className="path-readout">{rootPath || "No folder selected"}</div>
+          <p className="section-label">Analyze</p>
           <button
             className="scan-action"
             type="button"
-            disabled={!rootPath || status === "scanning"}
-            onClick={runScan}
+            disabled={busy}
+            onClick={() => void runScan()}
           >
-            <Activity size={17} />
-            {status === "scanning"
-              ? "Analyzing structure..."
-              : "Start deep scan"}
+            {busy ? (
+              <Loader2 size={17} className="spin" />
+            ) : (
+              <Activity size={17} />
+            )}
+            {busy ? "Measuring targets…" : "Analyze cleanup targets"}
           </button>
+          {busy ? (
+            <p className="muted-copy">{measured} targets measured…</p>
+          ) : scanState === "complete" ? (
+            <p className="muted-copy">{targets.length} targets scanned.</p>
+          ) : (
+            <p className="muted-copy">
+              Nothing is deleted until you act on an item.
+            </p>
+          )}
         </section>
 
         <section className="rail-section">
+          <p className="section-label">Disk free · data volume</p>
+          <div className="disk-readout">
+            <div className="disk-line">
+              <span>Before</span>
+              <strong>{freeBeforeHuman}</strong>
+            </div>
+            <div className="disk-line">
+              <span>Now</span>
+              <strong>{freeNowHuman}</strong>
+            </div>
+            <div className="disk-line freed" data-active={freedTotal > 0}>
+              <span>Freed</span>
+              <strong>{freedTotal > 0 ? `~${freedTotal} GB` : "—"}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="rail-section rail-bottom">
           <p className="section-label">Release channel</p>
           <button
             className="quiet-action"
@@ -136,7 +272,7 @@ export function App() {
             {updater.current === "available" && updater.version
               ? `Version ${updater.version} is available.`
               : updater.current === "checking"
-                ? "Checking signed release manifest..."
+                ? "Checking signed release manifest…"
                 : updater.current === "error"
                   ? "Updater manifest is not reachable yet."
                   : "Release channel is configured."}
@@ -147,119 +283,375 @@ export function App() {
       <section className="intelligence-surface">
         <header className="surface-header">
           <div>
-            <p className="eyebrow">Dry-run analysis</p>
-            <h2>Review candidates before taking action.</h2>
+            <p className="eyebrow">Catalog review</p>
+            <h2>Review known caches, then clean them one by one.</h2>
           </div>
           <div className="safety-pill">
             <ShieldCheck size={16} />
-            No files are modified
+            No files touched until you act
           </div>
         </header>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <div className="metric-grid">
-          <div className="metric">
-            <span>Scanned</span>
-            <strong>{formatBytes(summary.totalBytes)}</strong>
+        {targets.length === 0 ? (
+          <div className="empty-state">
+            <HardDrive size={28} />
+            <p>
+              {busy
+                ? "Measuring known caches and regenerable data…"
+                : "Run an analysis to list cleanup targets grouped by tier."}
+            </p>
           </div>
-          <div className="metric">
-            <span>Candidates</span>
-            <strong>{formatBytes(summary.candidateBytes)}</strong>
+        ) : (
+          <div className="tier-stack">
+            {TIER_ORDER.map((tier) => {
+              const rows = grouped[tier];
+              if (rows.length === 0) return null;
+              const tierBytes = rows.reduce((sum, r) => sum + r.sizeBytes, 0);
+              return (
+                <div className="tier-group" key={tier} data-tier={tier}>
+                  <div className="tier-header">
+                    <span className="tier-dot" />
+                    <span className="tier-name">{TIER_LABELS[tier]}</span>
+                    <span className="tier-total">{formatBytes(tierBytes)}</span>
+                  </div>
+                  {rows.map((target) => (
+                    <TargetRow
+                      key={target.id}
+                      target={target}
+                      selected={target.id === selectedId}
+                      expanded={expanded.has(target.id)}
+                      action={actions[targetKey(target.id)]}
+                      itemAction={(itemId) =>
+                        actions[itemKey(target.id, itemId)]
+                      }
+                      onSelect={() => setSelectedId(target.id)}
+                      onToggle={() => toggleExpand(target.id)}
+                      onClean={() => handleTarget(target)}
+                      onCleanItem={(item) => handleItem(target, item)}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </div>
-          <div className="metric">
-            <span>Files</span>
-            <strong>{summary.scannedFiles.toLocaleString()}</strong>
-          </div>
-          <div className="metric">
-            <span>Folders</span>
-            <strong>{summary.scannedDirectories.toLocaleString()}</strong>
-          </div>
-        </div>
-
-        <div className="category-strip">
-          {categoryTotals.length === 0 ? (
-            <div className="category-empty">
-              Run a scan to classify optimization candidates.
-            </div>
-          ) : (
-            categoryTotals.map(([kind, bytes]) => (
-              <div className="category-chip" key={kind}>
-                <span>{kindLabels[kind]}</span>
-                <strong>{formatBytes(bytes)}</strong>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div className="candidate-table">
-          <div className="table-head">
-            <span>Candidate</span>
-            <span>Type</span>
-            <span>Size</span>
-            <span>Confidence</span>
-          </div>
-          {summary.candidates.length === 0 ? (
-            <div className="empty-state">
-              <Sparkles size={28} />
-              <p>
-                Clarus will list candidates here with the reason for each
-                recommendation.
-              </p>
-            </div>
-          ) : (
-            summary.candidates.map((candidate) => (
-              <button
-                className="candidate-row"
-                data-active={candidate.id === selected?.id}
-                key={candidate.id}
-                type="button"
-                onClick={() => setSelectedId(candidate.id)}
-              >
-                <span className="candidate-path">{candidate.path}</span>
-                <span>{kindLabels[candidate.kind]}</span>
-                <span>{formatBytes(candidate.sizeBytes)}</span>
-                <span>{candidate.confidence}</span>
-              </button>
-            ))
-          )}
-        </div>
+        )}
       </section>
 
       <aside className="evidence-panel">
         <p className="section-label">Evidence</p>
         {selected ? (
           <>
-            <h3>{kindLabels[selected.kind]}</h3>
-            <p className="evidence-path">{selected.path}</p>
+            <h3>{selected.name}</h3>
+            {selected.path ? (
+              <p className="evidence-path">{selected.path}</p>
+            ) : null}
             <div className="evidence-card">
               <span>Reason</span>
               <p>{selected.reason}</p>
             </div>
             <div className="evidence-card">
-              <span>Estimated recovery</span>
-              <p>{formatBytes(selected.sizeBytes)}</p>
+              <span>Risk</span>
+              <p>{selected.riskNote}</p>
             </div>
-            <button className="quiet-action" type="button">
-              <ArrowUpRight size={16} />
-              Exclude folder
-            </button>
-            <button className="danger-action" type="button" disabled>
-              <Trash2 size={16} />
-              Move to Trash
-            </button>
-            <p className="muted-copy">
-              Trash actions are intentionally gated until review and undo flows
-              are implemented.
-            </p>
+            {selected.caveat ? (
+              <div className="evidence-card warn">
+                <span>Caveat</span>
+                <p>{selected.caveat}</p>
+              </div>
+            ) : null}
+            {selected.command ? (
+              <div className="evidence-card">
+                <span>Exact command</span>
+                <code className="command-block">{selected.command}</code>
+              </div>
+            ) : selected.tier === "three" ? (
+              <div className="evidence-card warn">
+                <span>Manual only</span>
+                <p>Clarus never deletes Tier 3 data automatically.</p>
+              </div>
+            ) : null}
           </>
         ) : (
           <div className="evidence-empty">
             <CheckCircle2 size={28} />
-            <p>Select a candidate to inspect why Clarus marked it.</p>
+            <p>Select a target to inspect why Clarus flagged it.</p>
           </div>
         )}
       </aside>
+
+      {confirmReq ? (
+        <ConfirmModal
+          request={confirmReq}
+          onCancel={() => setConfirmReq(null)}
+          onConfirm={() => {
+            const req = confirmReq;
+            setConfirmReq(null);
+            void req.run();
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function sortTargets(list: CleanupTarget[]): CleanupTarget[] {
+  const rank: Record<Tier, number> = { one: 0, two: 1, three: 2 };
+  return list
+    .slice()
+    .sort((a, b) => rank[a.tier] - rank[b.tier] || a.name.localeCompare(b.name));
+}
+
+function StatusChip({ status }: { status: Status }) {
+  return (
+    <span className="status-chip" data-status={status}>
+      {STATUS_LABELS[status]}
+    </span>
+  );
+}
+
+function ActionButton({
+  action,
+  disabled,
+  danger,
+  onClick,
+}: {
+  action: ActionState | undefined;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  const phase = action?.phase ?? "idle";
+  if (phase === "cleaning") {
+    return (
+      <button className="row-action" type="button" disabled>
+        <Loader2 size={14} className="spin" />
+        Cleaning…
+      </button>
+    );
+  }
+  if (phase === "done") {
+    return (
+      <button className="row-action done" type="button" disabled>
+        <CheckCircle2 size={14} />
+        {action?.freedGb && action.freedGb > 0
+          ? `Freed ~${action.freedGb} GB`
+          : "Cleaned"}
+      </button>
+    );
+  }
+  if (phase === "error") {
+    return (
+      <button
+        className="row-action error"
+        type="button"
+        title={action?.message}
+        onClick={onClick}
+      >
+        <AlertTriangle size={14} />
+        Retry
+      </button>
+    );
+  }
+  return (
+    <button
+      className={danger ? "row-action danger" : "row-action"}
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <Trash2 size={14} />
+      Clean
+    </button>
+  );
+}
+
+function TargetRow({
+  target,
+  selected,
+  expanded,
+  action,
+  itemAction,
+  onSelect,
+  onToggle,
+  onClean,
+  onCleanItem,
+}: {
+  target: CleanupTarget;
+  selected: boolean;
+  expanded: boolean;
+  action: ActionState | undefined;
+  itemAction: (itemId: string) => ActionState | undefined;
+  onSelect: () => void;
+  onToggle: () => void;
+  onClean: () => void;
+  onCleanItem: (item: CleanupItem) => void;
+}) {
+  const isContainer = target.subitems.length > 0;
+  const isTier3 = target.tier === "three";
+  const actionable = isTargetActionable(target);
+
+  return (
+    <div className="target-block">
+      <div
+        className="target-row"
+        data-active={selected}
+        onClick={onSelect}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          }
+        }}
+      >
+        <div className="target-lead">
+          {isContainer ? (
+            <button
+              className="expand-toggle"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+              }}
+              aria-label={expanded ? "Collapse" : "Expand"}
+            >
+              {expanded ? (
+                <ChevronDown size={15} />
+              ) : (
+                <ChevronRight size={15} />
+              )}
+            </button>
+          ) : (
+            <span className="expand-spacer" />
+          )}
+          <div className="target-text">
+            <span className="target-name">{target.name}</span>
+            {target.path ? (
+              <span className="target-path" title={target.path}>
+                {target.path}
+              </span>
+            ) : isContainer ? (
+              <span className="target-path">
+                {target.subitems.length} item
+                {target.subitems.length === 1 ? "" : "s"}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <StatusChip status={target.status} />
+        <span className="target-size">{target.sizeHuman || "—"}</span>
+
+        <div className="target-cta" onClick={(e) => e.stopPropagation()}>
+          {isTier3 ? (
+            <span className="manual-tag">
+              <CircleSlash size={13} />
+              Manual only
+            </span>
+          ) : isContainer ? (
+            <span className="manual-tag subtle">Per item</span>
+          ) : (
+            <ActionButton
+              action={action}
+              disabled={!actionable}
+              danger={target.requiresDoubleConfirm}
+              onClick={onClean}
+            />
+          )}
+        </div>
+      </div>
+
+      {isContainer && expanded ? (
+        <div className="subitem-list">
+          {target.subitems.map((item) => (
+            <div className="subitem-row" key={item.id}>
+              <div className="subitem-text">
+                <span className="subitem-label">{item.label}</span>
+                {item.meta ? (
+                  <span className="subitem-meta">{item.meta}</span>
+                ) : null}
+              </div>
+              <span className="target-size">{item.sizeHuman || "—"}</span>
+              <ActionButton
+                action={itemAction(item.id)}
+                danger={item.requiresDoubleConfirm}
+                onClick={() => onCleanItem(item)}
+              />
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ConfirmModal({
+  request,
+  onCancel,
+  onConfirm,
+}: {
+  request: ConfirmRequest;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const confirmed = value.trim() === "SI";
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onCancel();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-scrim" onClick={onCancel}>
+      <div
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-head">
+          <AlertTriangle size={18} />
+          <h3>High-risk action</h3>
+        </div>
+        <p className="modal-target">{request.title}</p>
+        <p className="modal-copy">
+          This action is destructive and cannot be undone. Type{" "}
+          <strong>SI</strong> to confirm.
+        </p>
+        <code className="command-block">{request.command}</code>
+        <input
+          className="confirm-input"
+          value={value}
+          autoFocus
+          spellCheck={false}
+          placeholder="Type SI to confirm"
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && confirmed) onConfirm();
+          }}
+        />
+        <div className="modal-actions">
+          <button className="quiet-action" type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="row-action danger"
+            type="button"
+            disabled={!confirmed}
+            onClick={onConfirm}
+          >
+            <Trash2 size={14} />
+            Confirm cleanup
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

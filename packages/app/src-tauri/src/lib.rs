@@ -1,3 +1,4 @@
+pub mod cleanup;
 pub mod scan;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -7,7 +8,13 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![scan::scan_directory])
+        .invoke_handler(tauri::generate_handler![
+            scan::scan_directory,
+            cleanup::scan_cleanup_targets,
+            cleanup::clean_target,
+            cleanup::clean_item,
+            cleanup::disk_free
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Clarus");
 }
