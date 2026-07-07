@@ -1,0 +1,1063 @@
+//! Disk cleanup catalog — a faithful port of `~/disk-cleanup.sh`.
+//!
+//! The catalog lists a fixed set of known macOS caches and regenerable data,
+//! grouped into three tiers. Detection (paths / tool availability / sub-item
+//! enumeration) is fast and deterministic; measuring size (`du`) is slow, so a
+//! scan enumerates the catalog first, then fills sizes concurrently, emitting a
+//! `cleanup://target` event per target as it finishes.
+//!
+//! Cleanup commands are copied verbatim from the script so the app does exactly
+//! the same thing. Commands run through a login shell (`bash -lc`) so tools such
+//! as `brew`, `yarn`, `nvm`, and `docker` resolve on PATH the way they do in the
+//! user's terminal.
+
+use std::process::Command;
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+
+// ─────────────────────────────────────────────────────────────────
+// TYPES  (serde camelCase — the frontend mirrors this exactly)
+// ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Tier {
+    One,
+    Two,
+    Three,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Status {
+    Available,
+    Empty,
+    ToolMissing,
+    NotInstalled,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Item {
+    id: String,
+    label: String,
+    path: String,
+    size_bytes: u64,
+    size_human: String,
+    meta: Option<String>,
+    requires_double_confirm: bool,
+    command: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Target {
+    id: String,
+    name: String,
+    tier: Tier,
+    path: Option<String>,
+    size_bytes: u64,
+    size_human: String,
+    status: Status,
+    reason: String,
+    risk_note: String,
+    caveat: Option<String>,
+    requires_double_confirm: bool,
+    command: Option<String>,
+    subitems: Vec<Item>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupScan {
+    free_before_gb: i64,
+    free_before_human: String,
+    targets: Vec<Target>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanResult {
+    ok: bool,
+    message: Option<String>,
+    free_gb: i64,
+    free_human: String,
+    freed_gb: i64,
+}
+
+// ─────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────
+
+fn home() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
+/// Expand a leading `~` to $HOME.
+fn expand(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", home(), rest)
+    } else if path == "~" {
+        home()
+    } else {
+        path.to_string()
+    }
+}
+
+/// Run a command through a login shell, capturing stdout+stderr.
+fn run_bash(cmd: &str) -> Result<String, String> {
+    let output = Command::new("bash")
+        .arg("-lc")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("Failed to spawn shell: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    if output.status.success() {
+        Ok(text)
+    } else {
+        Err(if text.trim().is_empty() {
+            format!("Command exited with status {}", output.status)
+        } else {
+            text
+        })
+    }
+}
+
+/// `command -v <tool>` — true if the tool resolves on PATH.
+fn has_tool(tool: &str) -> bool {
+    Command::new("bash")
+        .arg("-lc")
+        .arg(format!("command -v {tool} >/dev/null 2>&1"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Size in bytes via `du -sk` (KB blocks → bytes). 0 if the path is missing.
+fn du_bytes(path: &str) -> u64 {
+    let expanded = expand(path);
+    let output = match Command::new("du").arg("-sk").arg(&expanded).output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split_whitespace()
+        .next()
+        .and_then(|kb| kb.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+/// Mirror of `src/format.ts` formatBytes.
+fn size_human(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut index = (bytes as f64).log(1024.0).floor() as usize;
+    if index >= units.len() {
+        index = units.len() - 1;
+    }
+    let value = bytes as f64 / 1024f64.powi(index as i32);
+    let decimals = if value >= 10.0 || index == 0 { 0 } else { 1 };
+    format!("{value:.decimals$} {}", units[index])
+}
+
+/// Free space on the data volume, GB, matching the script's `df_free`.
+fn disk_free_gb() -> i64 {
+    let output = match Command::new("df")
+        .arg("-g")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    parse_df_field(&String::from_utf8_lossy(&output.stdout))
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Free space human string, matching the script's `df_free_human`.
+fn disk_free_human() -> String {
+    let output = match Command::new("df")
+        .arg("-h")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return "?".to_string(),
+    };
+    parse_df_field(&String::from_utf8_lossy(&output.stdout)).unwrap_or_else(|| "?".to_string())
+}
+
+/// `df` output: second line, 4th field (Avail).
+fn parse_df_field(text: &str) -> Option<String> {
+    text.lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().nth(3))
+        .map(|s| s.to_string())
+}
+
+fn path_exists(path: &str) -> bool {
+    std::path::Path::new(&expand(path)).exists()
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CATALOG DEFINITIONS  (fast — no `du`; reused by scan and clean)
+// ─────────────────────────────────────────────────────────────────
+
+/// A small builder to reduce boilerplate for the many simple targets.
+struct Def {
+    id: &'static str,
+    name: &'static str,
+    tier: Tier,
+    path: Option<String>,
+    reason: &'static str,
+    risk_note: &'static str,
+    caveat: Option<&'static str>,
+    requires_double_confirm: bool,
+    command: Option<String>,
+    status: Status,
+    subitems: Vec<Item>,
+}
+
+impl Def {
+    fn into_target(self) -> Target {
+        Target {
+            id: self.id.to_string(),
+            name: self.name.to_string(),
+            tier: self.tier,
+            path: self.path,
+            size_bytes: 0,
+            size_human: String::new(),
+            status: self.status,
+            reason: self.reason.to_string(),
+            risk_note: self.risk_note.to_string(),
+            caveat: self.caveat.map(|c| c.to_string()),
+            requires_double_confirm: self.requires_double_confirm,
+            command: self.command,
+            subitems: self.subitems,
+        }
+    }
+}
+
+fn tier1(
+    id: &'static str,
+    name: &'static str,
+    path: &str,
+    reason: &'static str,
+    caveat: Option<&'static str>,
+    command: String,
+) -> Target {
+    Def {
+        id,
+        name,
+        tier: Tier::One,
+        path: Some(path.to_string()),
+        reason,
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat,
+        requires_double_confirm: false,
+        command: Some(command),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// Build the full catalog with detection done but sizes unmeasured.
+pub fn catalog_defs() -> Vec<Target> {
+    let mut targets: Vec<Target> = Vec::new();
+
+    // ── TIER 1 — pure caches ─────────────────────────────────────
+    targets.push(tier1(
+        "yarn",
+        "Yarn cache",
+        "~/Library/Caches/Yarn",
+        "Yarn's package download cache.",
+        None,
+        "yarn cache clean 2>/dev/null || rm -rf ~/Library/Caches/Yarn/*".to_string(),
+    ));
+
+    // npm cache dir is resolved via `npm config get cache`.
+    let npm_dir = run_bash("npm config get cache 2>/dev/null || echo ~/.npm")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| expand("~/.npm"));
+    targets.push(tier1(
+        "npm",
+        "npm cache",
+        &npm_dir,
+        "npm's package download cache.",
+        None,
+        "npm cache clean --force".to_string(),
+    ));
+
+    targets.push(tier1(
+        "pip",
+        "pip cache",
+        "~/Library/Caches/pip",
+        "pip's wheel/download cache.",
+        None,
+        "rm -rf ~/Library/Caches/pip/*".to_string(),
+    ));
+
+    // Homebrew — only if brew is installed.
+    if has_tool("brew") {
+        let brew_cache = run_bash("brew --cache 2>/dev/null")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| expand("~/Library/Caches/Homebrew"));
+        targets.push(tier1(
+            "homebrew",
+            "Homebrew cache",
+            &brew_cache,
+            "Downloaded bottles and old versions kept by Homebrew.",
+            None,
+            "brew cleanup -s 2>/dev/null; rm -rf \"$(brew --cache)\"".to_string(),
+        ));
+    } else {
+        targets.push(
+            Def {
+                id: "homebrew",
+                name: "Homebrew cache",
+                tier: Tier::One,
+                path: None,
+                reason: "Downloaded bottles and old versions kept by Homebrew.",
+                risk_note: "Pure cache — regenerated automatically by the owning tool.",
+                caveat: None,
+                requires_double_confirm: false,
+                command: None,
+                status: Status::NotInstalled,
+                subitems: Vec::new(),
+            }
+            .into_target(),
+        );
+    }
+
+    targets.push(tier1(
+        "shipit",
+        "ShipIt installer cache",
+        "~/Library/Caches/com.todesktop.230313mzl4w4u92.ShipIt",
+        "Leftover installer payloads from a ToDesktop app updater.",
+        None,
+        "rm -rf ~/Library/Caches/com.todesktop.230313mzl4w4u92.ShipIt/*".to_string(),
+    ));
+
+    targets.push(tier1(
+        "playwright",
+        "Playwright cache",
+        "~/Library/Caches/ms-playwright",
+        "Downloaded Playwright browser binaries.",
+        Some("Re-downloaded next time you run `playwright install`."),
+        "rm -rf ~/Library/Caches/ms-playwright/*".to_string(),
+    ));
+
+    targets.push(tier1(
+        "spotify",
+        "Spotify cache",
+        "~/Library/Caches/com.spotify.client",
+        "Spotify's local media cache.",
+        Some("Quits Spotify if it is running."),
+        "osascript -e 'quit app \"Spotify\"' 2>/dev/null; sleep 1; rm -rf ~/Library/Caches/com.spotify.client/*"
+            .to_string(),
+    ));
+
+    targets.push(tier1(
+        "chrome",
+        "Google Chrome cache",
+        "~/Library/Caches/Google/Chrome",
+        "Chrome's on-disk web cache.",
+        Some("Quits Google Chrome if it is running."),
+        "osascript -e 'quit app \"Google Chrome\"' 2>/dev/null; sleep 1; rm -rf ~/Library/Caches/Google/Chrome/*"
+            .to_string(),
+    ));
+
+    targets.push(tier1(
+        "bun",
+        "Bun cache",
+        "~/.bun/install/cache",
+        "Bun's package install cache.",
+        None,
+        "bun pm cache rm 2>/dev/null || rm -rf ~/.bun/install/cache/*".to_string(),
+    ));
+
+    // ── TIER 2 — regenerables ────────────────────────────────────
+    targets.push(docker_prune_target());
+    targets.push(docker_raw_target());
+    targets.push(ios_unavailable_target());
+    targets.push(ios_runtimes_target());
+    targets.push(nvm_target());
+
+    targets.push(
+        Def {
+            id: "xcode-archives",
+            name: "Xcode Archives",
+            tier: Tier::Two,
+            path: Some("~/Library/Developer/Xcode/Archives".to_string()),
+            reason: "Archived app builds from Xcode.",
+            risk_note: "Regenerable — rebuild/re-archive from Xcode if needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: Some("rm -rf ~/Library/Developer/Xcode/Archives/*".to_string()),
+            status: Status::Available,
+            subitems: Vec::new(),
+        }
+        .into_target(),
+    );
+
+    targets.push(
+        Def {
+            id: "xcode-deriveddata",
+            name: "Xcode DerivedData",
+            tier: Tier::Two,
+            path: Some("~/Library/Developer/Xcode/DerivedData".to_string()),
+            reason: "Xcode build intermediates and indexes.",
+            risk_note: "Regenerable — Xcode rebuilds this on next build.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: Some("rm -rf ~/Library/Developer/Xcode/DerivedData/*".to_string()),
+            status: Status::Available,
+            subitems: Vec::new(),
+        }
+        .into_target(),
+    );
+
+    // Cargo — smart clean if cargo-cache is present, else manual registry cache.
+    let cargo_cmd = if has_tool("cargo-cache") {
+        "cargo cache --autoclean".to_string()
+    } else {
+        "rm -rf ~/.cargo/registry/cache/*".to_string()
+    };
+    targets.push(
+        Def {
+            id: "cargo",
+            name: "Cargo cache",
+            tier: Tier::Two,
+            path: Some("~/.cargo/registry".to_string()),
+            reason: "Cargo's registry sources and download cache.",
+            risk_note: "Regenerable — Cargo re-fetches crates on next build.",
+            caveat: if has_tool("cargo-cache") {
+                None
+            } else {
+                Some("cargo-cache not installed; cleans ~/.cargo/registry/cache manually.")
+            },
+            requires_double_confirm: false,
+            command: Some(cargo_cmd),
+            status: Status::Available,
+            subitems: Vec::new(),
+        }
+        .into_target(),
+    );
+
+    targets.push(conductor_target());
+    targets.push(android_images_target());
+
+    // ── TIER 3 — persistent data (informational only) ────────────
+    for (id, name, path) in [
+        (
+            "postgres",
+            "PostgreSQL databases",
+            "~/Library/Application Support/Postgres/var-16/base",
+        ),
+        (
+            "spark",
+            "Spark Desktop emails",
+            "~/Library/Application Support/Spark Desktop/core-data",
+        ),
+        (
+            "claude-vm",
+            "Claude VM bundles",
+            "~/Library/Application Support/Claude/vm_bundles",
+        ),
+        (
+            "utm",
+            "UTM Virtual Machines",
+            "~/Library/Containers/com.utmapp.UTM/Data",
+        ),
+        (
+            "whatsapp",
+            "WhatsApp data",
+            "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
+        ),
+        ("notion", "Notion", "~/Library/Application Support/Notion"),
+        ("cursor", "Cursor editor", "~/Library/Application Support/Cursor"),
+        (
+            "chrome-profiles",
+            "Google Chrome profiles",
+            "~/Library/Application Support/Google",
+        ),
+    ] {
+        targets.push(
+            Def {
+                id: Box::leak(id.to_string().into_boxed_str()),
+                name: Box::leak(name.to_string().into_boxed_str()),
+                tier: Tier::Three,
+                path: Some(path.to_string()),
+                reason: "Persistent user data — shown for awareness only.",
+                risk_note: "Requires a manual decision. Clarus never deletes Tier 3 data.",
+                caveat: None,
+                requires_double_confirm: false,
+                command: None,
+                status: Status::Available,
+                subitems: Vec::new(),
+            }
+            .into_target(),
+        );
+    }
+
+    targets
+}
+
+// ── Container / special target builders ──────────────────────────
+
+fn docker_raw_path() -> String {
+    format!(
+        "{}/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw",
+        home()
+    )
+}
+
+fn docker_installed() -> bool {
+    path_exists(&docker_raw_path())
+        || path_exists("~/Library/Containers/com.docker.docker")
+        || has_tool("docker")
+}
+
+fn docker_prune_target() -> Target {
+    let installed = docker_installed();
+    // Auto-start Docker (≤90s), then run the full prune sequence.
+    let command = "if ! docker info >/dev/null 2>&1; then \
+open -a Docker 2>/dev/null; t=0; \
+while ! docker info >/dev/null 2>&1; do sleep 3; t=$((t+3)); \
+if [ \"$t\" -ge 90 ]; then echo 'Docker did not start within 90s'; exit 1; fi; done; \
+fi; \
+docker builder prune -af 2>/dev/null; \
+docker image prune -af 2>/dev/null; \
+docker container prune -f 2>/dev/null; \
+docker volume prune -af 2>/dev/null; \
+docker system prune -af --volumes 2>/dev/null; \
+echo 'Docker prune completed'"
+        .to_string();
+
+    Def {
+        id: "docker-prune",
+        name: "Docker prune",
+        tier: Tier::Two,
+        path: Some(docker_raw_path()),
+        reason: "Dangling images, stopped containers, unused volumes and build cache.",
+        risk_note: "Removes unused Docker resources; running containers are untouched.",
+        caveat: Some("Starts Docker if it is not running (waits up to 90s)."),
+        requires_double_confirm: false,
+        command: if installed { Some(command) } else { None },
+        status: if installed {
+            Status::Available
+        } else {
+            Status::NotInstalled
+        },
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+fn docker_raw_target() -> Target {
+    let installed = docker_installed();
+    let raw = docker_raw_path();
+    let command = format!(
+        "osascript -e 'quit app \"Docker\"' 2>/dev/null; sleep 3; rm -f '{raw}'; open -a Docker 2>/dev/null"
+    );
+    Def {
+        id: "docker-raw",
+        name: "Docker.raw regeneration",
+        tier: Tier::Two,
+        path: Some(raw),
+        reason: "The Docker VM disk image. Regenerating reclaims physical space it no longer uses.",
+        risk_note: "Destroys ALL remaining Docker images and volumes.",
+        caveat: Some("Quits Docker, deletes Docker.raw, then reopens Docker."),
+        requires_double_confirm: true,
+        command: if installed { Some(command) } else { None },
+        status: if installed {
+            Status::Available
+        } else {
+            Status::NotInstalled
+        },
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+fn ios_unavailable_target() -> Target {
+    let has_xcrun = has_tool("xcrun");
+    Def {
+        id: "ios-sim-unavailable",
+        name: "iOS simulators (unavailable)",
+        tier: Tier::Two,
+        path: Some("~/Library/Developer/CoreSimulator/Devices".to_string()),
+        reason: "Simulator devices marked unavailable (e.g. from removed runtimes).",
+        risk_note: "Regenerable — recreate simulators from Xcode.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: if has_xcrun {
+            Some("xcrun simctl delete unavailable".to_string())
+        } else {
+            None
+        },
+        status: if has_xcrun {
+            Status::Available
+        } else {
+            Status::NotInstalled
+        },
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// Old iOS runtimes — keep the newest per platform (matches the script's jq).
+fn ios_runtimes_target() -> Target {
+    let (status, subitems) = if !has_tool("xcrun") {
+        (Status::NotInstalled, Vec::new())
+    } else if !has_tool("jq") {
+        (Status::ToolMissing, Vec::new())
+    } else {
+        let pipeline = ".runtimes | group_by(.name | split(\" \") | .[0:2] | join(\" \")) | .[] | sort_by(.version) | reverse | .[1:][] | select(.isAvailable == true) | .identifier";
+        let ids = run_bash(&format!("xcrun simctl list runtimes -j | jq -r '{pipeline}'"))
+            .unwrap_or_default();
+        let mut subitems = Vec::new();
+        for id in ids.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let name = run_bash(&format!(
+                "xcrun simctl list runtimes -j | jq -r '.runtimes[] | select(.identifier == \"{id}\") | .name'"
+            ))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| id.to_string());
+            subitems.push(Item {
+                id: id.to_string(),
+                label: if name.is_empty() { id.to_string() } else { name },
+                path: String::new(),
+                size_bytes: 0,
+                size_human: String::new(),
+                meta: Some(id.to_string()),
+                requires_double_confirm: false,
+                command: format!("xcrun simctl runtime delete '{id}'"),
+            });
+        }
+        (
+            if subitems.is_empty() {
+                Status::Empty
+            } else {
+                Status::Available
+            },
+            subitems,
+        )
+    };
+
+    Def {
+        id: "ios-runtimes",
+        name: "Old iOS runtimes",
+        tier: Tier::Two,
+        path: None,
+        reason: "Older simulator runtimes; the newest per platform is kept.",
+        risk_note: "Regenerable — re-download runtimes from Xcode if needed.",
+        caveat: if matches!(status, Status::ToolMissing) {
+            Some("jq is not installed; runtime pruning is unavailable.")
+        } else {
+            None
+        },
+        requires_double_confirm: false,
+        command: None,
+        status,
+        subitems,
+    }
+    .into_target()
+}
+
+/// Old nvm Node versions — only when >3 installed, keeping current + latest LTS.
+fn nvm_target() -> Target {
+    let nvm_dir = std::env::var("NVM_DIR").unwrap_or_else(|_| format!("{}/.nvm", home()));
+    let versions_dir = format!("{nvm_dir}/versions/node");
+
+    if !path_exists(&versions_dir) {
+        return Def {
+            id: "nvm",
+            name: "nvm — old Node versions",
+            tier: Tier::Two,
+            path: None,
+            reason: "Node versions installed via nvm.",
+            risk_note: "Regenerable — reinstall with `nvm install` if needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    // Sorted (version order) list of installed versions.
+    let listing = run_bash(&format!("ls '{versions_dir}' 2>/dev/null | sort -V")).unwrap_or_default();
+    let versions: Vec<String> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+
+    if versions.len() <= 3 {
+        return Def {
+            id: "nvm",
+            name: "nvm — old Node versions",
+            tier: Tier::Two,
+            path: None,
+            reason: "Node versions installed via nvm (≤3 installed — nothing to prune).",
+            risk_note: "Regenerable — reinstall with `nvm install` if needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::Empty,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let current = run_bash(&format!("source '{nvm_dir}/nvm.sh' 2>/dev/null; nvm current 2>/dev/null"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Latest v24.x, else the newest installed.
+    let lts = versions
+        .iter()
+        .filter(|v| v.starts_with("v24."))
+        .last()
+        .or_else(|| versions.last())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut subitems = Vec::new();
+    for v in &versions {
+        if *v == current || *v == lts {
+            continue;
+        }
+        let path = format!("{versions_dir}/{v}");
+        subitems.push(Item {
+            id: v.clone(),
+            label: v.clone(),
+            path: path.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: false,
+            command: format!(
+                "source '{nvm_dir}/nvm.sh' 2>/dev/null; nvm uninstall '{v}' 2>&1 || rm -rf '{path}'"
+            ),
+        });
+    }
+
+    Def {
+        id: "nvm",
+        name: "nvm — old Node versions",
+        tier: Tier::Two,
+        path: None,
+        reason: format!(
+            "Old Node versions (keeping current {} and LTS {}).",
+            if current.is_empty() { "?" } else { &current },
+            if lts.is_empty() { "?" } else { &lts }
+        )
+        .leak(),
+        risk_note: "Regenerable — reinstall with `nvm install` if needed.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// Conductor worktrees — each workspace individually, double-confirm if dirty.
+fn conductor_target() -> Target {
+    let dir = format!("{}/conductor/workspaces", home());
+    if !path_exists(&dir) {
+        return Def {
+            id: "conductor",
+            name: "Conductor worktrees",
+            tier: Tier::Two,
+            path: None,
+            reason: "Per-workspace git worktrees created by Conductor.",
+            risk_note: "Deleting a workspace removes its files permanently.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let mut subitems = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut dirs: Vec<_> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.path())
+            .collect();
+        dirs.sort();
+        for ws in dirs {
+            let ws_str = ws.to_string_lossy().to_string();
+            let name = ws
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| ws_str.clone());
+            let branch = run_bash(&format!("git -C '{ws_str}' branch --show-current 2>/dev/null"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let status_out = run_bash(&format!("git -C '{ws_str}' status --porcelain 2>/dev/null"))
+                .unwrap_or_default();
+            let dirty = !status_out.trim().is_empty();
+            let meta = format!(
+                "{} · {}",
+                if branch.is_empty() { "no-git".to_string() } else { branch },
+                if dirty { "uncommitted changes" } else { "clean" }
+            );
+            subitems.push(Item {
+                id: name.clone(),
+                label: name.clone(),
+                path: ws_str.clone(),
+                size_bytes: 0,
+                size_human: String::new(),
+                meta: Some(meta),
+                requires_double_confirm: dirty,
+                command: format!("rm -rf '{ws_str}'"),
+            });
+        }
+    }
+
+    Def {
+        id: "conductor",
+        name: "Conductor worktrees",
+        tier: Tier::Two,
+        path: None,
+        reason: "Per-workspace git worktrees created by Conductor.",
+        risk_note: "Deleting a workspace removes its files permanently.",
+        caveat: Some("Workspaces with uncommitted changes require a second confirmation."),
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// Android SDK system-images — each image individually.
+fn android_images_target() -> Target {
+    let base = format!("{}/Library/Android/sdk/system-images", home());
+    if !path_exists(&base) {
+        return Def {
+            id: "android-images",
+            name: "Android SDK system-images",
+            tier: Tier::Two,
+            path: None,
+            reason: "Emulator system images downloaded by the Android SDK.",
+            risk_note: "Regenerable — re-download from the SDK manager.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    // Enumerate api-level/*/* two levels deep (matches `find -maxdepth 2 -mindepth 2`).
+    let mut subitems = Vec::new();
+    if let Ok(level1) = std::fs::read_dir(&base) {
+        let mut l1: Vec<_> = level1.flatten().filter(|e| e.path().is_dir()).map(|e| e.path()).collect();
+        l1.sort();
+        for api in l1 {
+            if let Ok(level2) = std::fs::read_dir(&api) {
+                let mut l2: Vec<_> = level2.flatten().filter(|e| e.path().is_dir()).map(|e| e.path()).collect();
+                l2.sort();
+                for img in l2 {
+                    let img_str = img.to_string_lossy().to_string();
+                    let label = img_str.strip_prefix(&format!("{base}/")).unwrap_or(&img_str).to_string();
+                    subitems.push(Item {
+                        id: label.replace('/', "_"),
+                        label,
+                        path: img_str.clone(),
+                        size_bytes: 0,
+                        size_human: String::new(),
+                        meta: None,
+                        requires_double_confirm: false,
+                        command: format!("rm -rf '{img_str}'"),
+                    });
+                }
+            }
+        }
+    }
+
+    Def {
+        id: "android-images",
+        name: "Android SDK system-images",
+        tier: Tier::Two,
+        path: None,
+        reason: "Emulator system images downloaded by the Android SDK.",
+        risk_note: "Regenerable — re-download from the SDK manager.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+// ─────────────────────────────────────────────────────────────────
+// SIZE MEASUREMENT
+// ─────────────────────────────────────────────────────────────────
+
+/// Fill sizes for a target and its subitems, then finalize status.
+fn measure(target: &mut Target) {
+    for item in target.subitems.iter_mut() {
+        if !item.path.is_empty() {
+            item.size_bytes = du_bytes(&item.path);
+        }
+        item.size_human = size_human(item.size_bytes);
+    }
+
+    if !target.subitems.is_empty() {
+        target.size_bytes = target.subitems.iter().map(|i| i.size_bytes).sum();
+    } else if let Some(path) = &target.path {
+        target.size_bytes = du_bytes(path);
+    }
+    target.size_human = size_human(target.size_bytes);
+
+    // A pure-cache/simple target with a command but nothing on disk is "empty".
+    if matches!(target.status, Status::Available)
+        && target.subitems.is_empty()
+        && target.command.is_some()
+        && target.size_bytes == 0
+    {
+        target.status = Status::Empty;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// TAURI COMMANDS
+// ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String> {
+    let free_before_gb = disk_free_gb();
+    let free_before_human = disk_free_human();
+
+    let mut targets = catalog_defs();
+
+    // Fill sizes concurrently; emit an event per target as it completes.
+    std::thread::scope(|scope| {
+        let app_ref = &app;
+        for target in targets.iter_mut() {
+            scope.spawn(move || {
+                measure(target);
+                let _ = app_ref.emit("cleanup://target", &*target);
+            });
+        }
+    });
+
+    Ok(CleanupScan {
+        free_before_gb,
+        free_before_human,
+        targets,
+    })
+}
+
+fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
+    let free_gb = disk_free_gb();
+    let free_human = disk_free_human();
+    match run {
+        Ok(msg) => CleanResult {
+            ok: true,
+            message: Some(msg),
+            free_gb,
+            free_human,
+            freed_gb: free_gb - free_before,
+        },
+        Err(msg) => CleanResult {
+            ok: false,
+            message: Some(msg),
+            free_gb,
+            free_human,
+            freed_gb: free_gb - free_before,
+        },
+    }
+}
+
+#[tauri::command]
+pub fn clean_target(id: String, confirmed: bool) -> Result<CleanResult, String> {
+    let free_before = disk_free_gb();
+    let catalog = catalog_defs();
+    let target = catalog
+        .iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| format!("Unknown target: {id}"))?;
+
+    if target.requires_double_confirm && !confirmed {
+        return Err("This target requires explicit confirmation.".to_string());
+    }
+    let command = target
+        .command
+        .as_ref()
+        .ok_or_else(|| "This target has no cleanup action.".to_string())?;
+
+    Ok(clean_result(run_bash(command), free_before))
+}
+
+#[tauri::command]
+pub fn clean_item(
+    target_id: String,
+    item_id: String,
+    confirmed: bool,
+) -> Result<CleanResult, String> {
+    let free_before = disk_free_gb();
+    let catalog = catalog_defs();
+    let target = catalog
+        .iter()
+        .find(|t| t.id == target_id)
+        .ok_or_else(|| format!("Unknown target: {target_id}"))?;
+    let item = target
+        .subitems
+        .iter()
+        .find(|i| i.id == item_id)
+        .ok_or_else(|| format!("Unknown item: {item_id}"))?;
+
+    if item.requires_double_confirm && !confirmed {
+        return Err("This item requires explicit confirmation.".to_string());
+    }
+
+    Ok(clean_result(run_bash(&item.command), free_before))
+}
+
+#[tauri::command]
+pub fn disk_free() -> Result<CleanResult, String> {
+    let free_gb = disk_free_gb();
+    Ok(CleanResult {
+        ok: true,
+        message: None,
+        free_gb,
+        free_human: disk_free_human(),
+        freed_gb: 0,
+    })
+}
