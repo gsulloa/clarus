@@ -1,0 +1,234 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            arch: linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            build-essential \
+            curl \
+            file \
+            wget
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build signed bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: Developer ID Application
+        with:
+          projectPath: packages/app
+          args: --target ${{ matrix.target }}
+
+      - name: Stage macOS artifacts
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          BUNDLE_DIR="packages/app/src-tauri/target/${{ matrix.target }}/release/bundle"
+          DMG=$(ls "$BUNDLE_DIR/dmg/"*.dmg | head -1)
+          TARBALL=$(ls "$BUNDLE_DIR/macos/"*.app.tar.gz | head -1)
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p staging
+          cp "$DMG" "staging/Clarus_${VERSION}_${{ matrix.arch }}.dmg"
+          cp "$TARBALL" "staging/Clarus_${VERSION}_${{ matrix.arch }}.app.tar.gz"
+          cp "${TARBALL}.sig" "staging/Clarus_${VERSION}_${{ matrix.arch }}.app.tar.gz.sig"
+
+      - name: Stage Linux artifacts
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          BUNDLE_DIR="packages/app/src-tauri/target/${{ matrix.target }}/release/bundle"
+          APPIMAGE=$(ls "$BUNDLE_DIR/appimage/"*.AppImage | head -1)
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p staging
+          cp "$APPIMAGE" "staging/Clarus_${VERSION}_x64.AppImage"
+          cp "${APPIMAGE}.sig" "staging/Clarus_${VERSION}_x64.AppImage.sig"
+
+      - name: Stage Windows artifacts
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          BUNDLE_DIR="packages/app/src-tauri/target/${{ matrix.target }}/release/bundle"
+          MSI=$(ls "$BUNDLE_DIR/msi/"*.msi | head -1)
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p staging
+          cp "$MSI" "staging/Clarus_${VERSION}_x64.msi"
+          cp "${MSI}.sig" "staging/Clarus_${VERSION}_x64.msi.sig"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: staging/
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: staging
+          merge-multiple: true
+
+      - name: Verify artifacts
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          required=(
+            "staging/Clarus_${VERSION}_aarch64.dmg"
+            "staging/Clarus_${VERSION}_aarch64.app.tar.gz"
+            "staging/Clarus_${VERSION}_aarch64.app.tar.gz.sig"
+            "staging/Clarus_${VERSION}_x64.dmg"
+            "staging/Clarus_${VERSION}_x64.app.tar.gz"
+            "staging/Clarus_${VERSION}_x64.app.tar.gz.sig"
+            "staging/Clarus_${VERSION}_x64.AppImage"
+            "staging/Clarus_${VERSION}_x64.AppImage.sig"
+            "staging/Clarus_${VERSION}_x64.msi"
+            "staging/Clarus_${VERSION}_x64.msi.sig"
+          )
+          for file in "${required[@]}"; do test -f "$file"; done
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            staging/Clarus_${{ steps.ver.outputs.version }}_aarch64.dmg
+            staging/Clarus_${{ steps.ver.outputs.version }}_x64.dmg
+            staging/Clarus_${{ steps.ver.outputs.version }}_x64.AppImage
+            staging/Clarus_${{ steps.ver.outputs.version }}_x64.msi
+
+      - name: Build latest.json
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PUBLIC_URL_BASE: ${{ secrets.PUBLIC_URL_BASE }}
+          MANIFEST_MODE: ci
+          DARWIN_AARCH64_TARBALL: Clarus_${{ steps.ver.outputs.version }}_aarch64.app.tar.gz
+          DARWIN_AARCH64_SIG_PATH: staging/Clarus_${{ steps.ver.outputs.version }}_aarch64.app.tar.gz.sig
+          DARWIN_X86_64_TARBALL: Clarus_${{ steps.ver.outputs.version }}_x64.app.tar.gz
+          DARWIN_X86_64_SIG_PATH: staging/Clarus_${{ steps.ver.outputs.version }}_x64.app.tar.gz.sig
+          LINUX_X86_64_TARBALL: Clarus_${{ steps.ver.outputs.version }}_x64.AppImage
+          LINUX_X86_64_SIG_PATH: staging/Clarus_${{ steps.ver.outputs.version }}_x64.AppImage.sig
+          WINDOWS_X86_64_TARBALL: Clarus_${{ steps.ver.outputs.version }}_x64.msi
+          WINDOWS_X86_64_SIG_PATH: staging/Clarus_${{ steps.ver.outputs.version }}_x64.msi.sig
+        run: |
+          export PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          node packages/app/scripts/build-manifest.mjs
+
+      - name: Build download.json
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PUBLIC_URL_BASE: ${{ secrets.PUBLIC_URL_BASE }}
+          MANIFEST_MODE: ci
+          DARWIN_AARCH64_INSTALLER: Clarus_${{ steps.ver.outputs.version }}_aarch64.dmg
+          DARWIN_X86_64_INSTALLER: Clarus_${{ steps.ver.outputs.version }}_x64.dmg
+          LINUX_X86_64_INSTALLER: Clarus_${{ steps.ver.outputs.version }}_x64.AppImage
+          WINDOWS_X86_64_INSTALLER: Clarus_${{ steps.ver.outputs.version }}_x64.msi
+        run: |
+          export PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          node packages/app/scripts/build-download-manifest.mjs
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload release files
+        env:
+          BUCKET: ${{ secrets.RELEASE_S3_BUCKET }}
+        run: |
+          for file in staging/*; do
+            aws s3 cp "$file" "s3://${BUCKET}/$(basename "$file")" \
+              --cache-control "public, max-age=31536000, immutable"
+          done
+          aws s3 cp latest.json "s3://${BUCKET}/latest.json" \
+            --cache-control "no-cache, max-age=0" \
+            --content-type "application/json"
+          aws s3 cp download.json "s3://${BUCKET}/download.json" \
+            --cache-control "no-cache, max-age=0" \
+            --content-type "application/json"
+
+      - name: Invalidate manifests
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ secrets.RELEASE_CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/latest.json" "/download.json"

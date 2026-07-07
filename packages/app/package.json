@@ -1,0 +1,64 @@
+{
+  "name": "clarus",
+  "private": false,
+  "version": "0.1.0",
+  "description": "A precise Tauri desktop advisor for understanding and safely optimizing local disk usage.",
+  "license": "MIT",
+  "author": "Gabriel Ulloa <gabriel.ulloa.e@gmail.com>",
+  "homepage": "https://clarus.gulloa.click",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gsulloa/clarus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gsulloa/clarus/issues"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write .",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "changelog": "npx auto-changelog -p && git add CHANGELOG.md && git commit -m \"docs: update changelog\"",
+    "release": "bash scripts/release.sh",
+    "release:dry": "bash scripts/release.sh --dry-run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-dialog": "^2.2.0",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@tauri-apps/cli": "^2.2.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.18",
+    "jsdom": "^29.1.0",
+    "prettier": "^3.4.2",
+    "typescript-eslint": "^8.20.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^4.1.5"
+  }
+}

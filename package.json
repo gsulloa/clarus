@@ -1,0 +1,24 @@
+{
+  "name": "clarus-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter clarus dev",
+    "build": "pnpm --filter clarus build",
+    "preview": "pnpm --filter clarus preview",
+    "tauri": "pnpm --filter clarus tauri",
+    "tauri:dev": "pnpm --filter clarus tauri:dev",
+    "tauri:build": "pnpm --filter clarus tauri:build",
+    "typecheck": "pnpm --filter clarus typecheck",
+    "lint": "pnpm --filter clarus lint",
+    "format": "pnpm --filter clarus format",
+    "test": "pnpm --filter clarus test:run",
+    "infra": "pnpm --filter infra",
+    "infra:build": "pnpm --filter infra build",
+    "infra:synth": "pnpm --filter infra cdk synth"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
