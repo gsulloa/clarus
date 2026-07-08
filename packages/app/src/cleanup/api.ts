@@ -34,3 +34,12 @@ export async function onTargetMeasured(
     handler(event.payload);
   });
 }
+
+/** Subscribe to the one-shot catalog enumeration emitted at scan start. */
+export async function onCatalogEnumerated(
+  handler: (targets: CleanupTarget[]) => void,
+): Promise<UnlistenFn> {
+  return listen<CleanupTarget[]>("cleanup://catalog", (event) => {
+    handler(event.payload);
+  });
+}

@@ -17,6 +17,7 @@ import mark from "./assets/clarus-mark.svg";
 import {
   cleanItem,
   cleanTarget,
+  onCatalogEnumerated,
   onTargetMeasured,
   scanCleanupTargets,
 } from "./cleanup/api";
@@ -36,7 +37,12 @@ import { useUpdater } from "./platform/updater/useUpdater";
 type ScanState = "idle" | "scanning" | "complete" | "error";
 
 type ActionPhase = "idle" | "cleaning" | "done" | "error";
-type ActionState = { phase: ActionPhase; freedGb?: number; message?: string };
+type ActionState = {
+  phase: ActionPhase;
+  freedGb?: number;
+  message?: string;
+  startedAt?: number;
+};
 
 type ConfirmRequest = {
   key: string;
@@ -58,7 +64,8 @@ export function App() {
   const [scanState, setScanState] = useState<ScanState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [targets, setTargets] = useState<CleanupTarget[]>([]);
-  const [measured, setMeasured] = useState(0);
+  const [measuredIds, setMeasuredIds] = useState<Set<string>>(new Set());
+  const [total, setTotal] = useState(0);
 
   const [freeBefore, setFreeBefore] = useState<number | null>(null);
   const [freeBeforeHuman, setFreeBeforeHuman] = useState<string>("—");
@@ -86,6 +93,8 @@ export function App() {
     return map;
   }, [targets]);
 
+  const measured = measuredIds.size;
+
   const freedTotal =
     freeNow !== null && freeBefore !== null ? freeNow - freeBefore : 0;
 
@@ -93,12 +102,21 @@ export function App() {
     setScanState("scanning");
     setError(null);
     setTargets([]);
-    setMeasured(0);
+    setMeasuredIds(new Set());
+    setTotal(0);
     setActions({});
 
     unlistenRef.current?.();
-    const unlisten = await onTargetMeasured((target) => {
-      setMeasured((n) => n + 1);
+    const unlistenCatalog = await onCatalogEnumerated((catalog) => {
+      setTotal(catalog.length);
+      setTargets(sortTargets(catalog));
+    });
+    const unlistenMeasured = await onTargetMeasured((target) => {
+      setMeasuredIds((prev) => {
+        const next = new Set(prev);
+        next.add(target.id);
+        return next;
+      });
       setTargets((prev) => {
         const idx = prev.findIndex((t) => t.id === target.id);
         const next = idx === -1 ? [...prev, target] : prev.slice();
@@ -106,11 +124,17 @@ export function App() {
         return sortTargets(next);
       });
     });
+    const unlisten = () => {
+      unlistenCatalog();
+      unlistenMeasured();
+    };
     unlistenRef.current = unlisten;
 
     try {
       const scan = await scanCleanupTargets();
       setTargets(sortTargets(scan.targets));
+      setMeasuredIds(new Set(scan.targets.map((t) => t.id)));
+      setTotal(scan.targets.length);
       setFreeBefore(scan.freeBeforeGb);
       setFreeBeforeHuman(scan.freeBeforeHuman);
       setFreeNow(scan.freeBeforeGb);
@@ -139,7 +163,7 @@ export function App() {
 
   async function execTarget(target: CleanupTarget) {
     const key = targetKey(target.id);
-    setActions((p) => ({ ...p, [key]: { phase: "cleaning" } }));
+    setActions((p) => ({ ...p, [key]: { phase: "cleaning", startedAt: Date.now() } }));
     try {
       applyResult(key, await cleanTarget(target.id, true));
     } catch (err) {
@@ -152,7 +176,7 @@ export function App() {
 
   async function execItem(target: CleanupTarget, item: CleanupItem) {
     const key = itemKey(target.id, item.id);
-    setActions((p) => ({ ...p, [key]: { phase: "cleaning" } }));
+    setActions((p) => ({ ...p, [key]: { phase: "cleaning", startedAt: Date.now() } }));
     try {
       applyResult(key, await cleanItem(target.id, item.id, true));
     } catch (err) {
@@ -230,7 +254,25 @@ export function App() {
             {busy ? "Measuring targets…" : "Analyze cleanup targets"}
           </button>
           {busy ? (
-            <p className="muted-copy">{measured} targets measured…</p>
+            <>
+              <div
+                className="scan-progress"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={total || 1}
+                aria-valuenow={measured}
+              >
+                <div
+                  className="scan-progress-fill"
+                  style={{
+                    width: total ? `${(measured / total) * 100}%` : "0%",
+                  }}
+                />
+              </div>
+              <p className="muted-copy">
+                {measured} / {total || "…"} targets measured…
+              </p>
+            </>
           ) : scanState === "complete" ? (
             <p className="muted-copy">{targets.length} targets scanned.</p>
           ) : (
@@ -322,6 +364,7 @@ export function App() {
                       target={target}
                       selected={target.id === selectedId}
                       expanded={expanded.has(target.id)}
+                      measuring={!measuredIds.has(target.id)}
                       action={actions[targetKey(target.id)]}
                       itemAction={(itemId) =>
                         actions[itemKey(target.id, itemId)]
@@ -403,6 +446,18 @@ function sortTargets(list: CleanupTarget[]): CleanupTarget[] {
     .sort((a, b) => rank[a.tier] - rank[b.tier] || a.name.localeCompare(b.name));
 }
 
+function Elapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const secs = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const mm = Math.floor(secs / 60);
+  const ss = String(secs % 60).padStart(2, "0");
+  return <span className="elapsed">{`${mm}:${ss}`}</span>;
+}
+
 function StatusChip({ status }: { status: Status }) {
   return (
     <span className="status-chip" data-status={status}>
@@ -428,6 +483,7 @@ function ActionButton({
       <button className="row-action" type="button" disabled>
         <Loader2 size={14} className="spin" />
         Cleaning…
+        {action?.startedAt ? <Elapsed startedAt={action.startedAt} /> : null}
       </button>
     );
   }
@@ -471,6 +527,7 @@ function TargetRow({
   target,
   selected,
   expanded,
+  measuring,
   action,
   itemAction,
   onSelect,
@@ -481,6 +538,7 @@ function TargetRow({
   target: CleanupTarget;
   selected: boolean;
   expanded: boolean;
+  measuring: boolean;
   action: ActionState | undefined;
   itemAction: (itemId: string) => ActionState | undefined;
   onSelect: () => void;
@@ -542,8 +600,16 @@ function TargetRow({
           </div>
         </div>
 
-        <StatusChip status={target.status} />
-        <span className="target-size">{target.sizeHuman || "—"}</span>
+        {measuring ? (
+          <span className="skeleton skeleton-chip" />
+        ) : (
+          <StatusChip status={target.status} />
+        )}
+        {measuring ? (
+          <span className="skeleton skeleton-size" />
+        ) : (
+          <span className="target-size">{target.sizeHuman || "—"}</span>
+        )}
 
         <div className="target-cta" onClick={(e) => e.stopPropagation()}>
           {isTier3 ? (
@@ -563,6 +629,10 @@ function TargetRow({
           )}
         </div>
       </div>
+
+      {action?.phase === "cleaning" && target.caveat ? (
+        <p className="cleaning-hint">{target.caveat}</p>
+      ) : null}
 
       {isContainer && expanded ? (
         <div className="subitem-list">
