@@ -656,3 +656,79 @@ h3 {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Busy state uses local affordances (spinner, progress bar, skeletons),
+   never a global wait cursor. */
+body {
+  cursor: default;
+}
+
+.scan-progress {
+  margin-top: 10px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.scan-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 240ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton {
+  display: inline-block;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--surface) 25%,
+    var(--surface-strong) 37%,
+    var(--surface) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton-size {
+  width: 52px;
+  height: 12px;
+}
+
+.skeleton-chip {
+  width: 62px;
+  height: 18px;
+  border-radius: 999px;
+}
+
+.elapsed {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.cleaning-hint {
+  margin: 2px 0 6px 34px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--surface-strong);
+  }
+  .scan-progress-fill {
+    transition: none;
+  }
+}

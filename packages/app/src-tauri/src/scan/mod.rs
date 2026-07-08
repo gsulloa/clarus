@@ -47,7 +47,8 @@ pub struct ScanSummary {
 }
 
 #[tauri::command]
-pub fn scan_directory(path: String) -> Result<ScanSummary, String> {
+pub async fn scan_directory(path: String) -> Result<ScanSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ScanSummary, String> {
     let root = PathBuf::from(path);
     if !root.exists() {
         return Err("Selected folder does not exist.".to_string());
@@ -133,6 +134,9 @@ pub fn scan_directory(path: String) -> Result<ScanSummary, String> {
         candidate_bytes,
         candidates,
     })
+    })
+    .await
+    .map_err(|e| format!("scan task failed: {e}"))?
 }
 
 fn classify_path(path: &Path, size: u64) -> Option<CandidateKind> {

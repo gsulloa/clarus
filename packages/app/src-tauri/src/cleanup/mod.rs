@@ -960,28 +960,38 @@ fn measure(target: &mut Target) {
 // ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String> {
-    let free_before_gb = disk_free_gb();
-    let free_before_human = disk_free_human();
+pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<CleanupScan, String> {
+        let free_before_gb = disk_free_gb();
+        let free_before_human = disk_free_human();
 
-    let mut targets = catalog_defs();
+        let mut targets = catalog_defs();
 
-    // Fill sizes concurrently; emit an event per target as it completes.
-    std::thread::scope(|scope| {
-        let app_ref = &app;
-        for target in targets.iter_mut() {
-            scope.spawn(move || {
-                measure(target);
-                let _ = app_ref.emit("cleanup://target", &*target);
-            });
-        }
-    });
+        // Enumeration phase: emit the full unmeasured catalog (with total) up
+        // front so the UI can render skeleton rows and a determinate bar before
+        // any slow `du` runs.
+        let _ = app.emit("cleanup://catalog", &targets);
 
-    Ok(CleanupScan {
-        free_before_gb,
-        free_before_human,
-        targets,
+        // Measuring phase: fill sizes concurrently; emit an event per target as
+        // it completes.
+        std::thread::scope(|scope| {
+            let app_ref = &app;
+            for target in targets.iter_mut() {
+                scope.spawn(move || {
+                    measure(target);
+                    let _ = app_ref.emit("cleanup://target", &*target);
+                });
+            }
+        });
+
+        Ok(CleanupScan {
+            free_before_gb,
+            free_before_human,
+            targets,
+        })
     })
+    .await
+    .map_err(|e| format!("scan task failed: {e}"))?
 }
 
 fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
@@ -1006,48 +1016,56 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
 }
 
 #[tauri::command]
-pub fn clean_target(id: String, confirmed: bool) -> Result<CleanResult, String> {
-    let free_before = disk_free_gb();
-    let catalog = catalog_defs();
-    let target = catalog
-        .iter()
-        .find(|t| t.id == id)
-        .ok_or_else(|| format!("Unknown target: {id}"))?;
+pub async fn clean_target(id: String, confirmed: bool) -> Result<CleanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<CleanResult, String> {
+        let free_before = disk_free_gb();
+        let catalog = catalog_defs();
+        let target = catalog
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| format!("Unknown target: {id}"))?;
 
-    if target.requires_double_confirm && !confirmed {
-        return Err("This target requires explicit confirmation.".to_string());
-    }
-    let command = target
-        .command
-        .as_ref()
-        .ok_or_else(|| "This target has no cleanup action.".to_string())?;
+        if target.requires_double_confirm && !confirmed {
+            return Err("This target requires explicit confirmation.".to_string());
+        }
+        let command = target
+            .command
+            .as_ref()
+            .ok_or_else(|| "This target has no cleanup action.".to_string())?;
 
-    Ok(clean_result(run_bash(command), free_before))
+        Ok(clean_result(run_bash(command), free_before))
+    })
+    .await
+    .map_err(|e| format!("cleanup task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn clean_item(
+pub async fn clean_item(
     target_id: String,
     item_id: String,
     confirmed: bool,
 ) -> Result<CleanResult, String> {
-    let free_before = disk_free_gb();
-    let catalog = catalog_defs();
-    let target = catalog
-        .iter()
-        .find(|t| t.id == target_id)
-        .ok_or_else(|| format!("Unknown target: {target_id}"))?;
-    let item = target
-        .subitems
-        .iter()
-        .find(|i| i.id == item_id)
-        .ok_or_else(|| format!("Unknown item: {item_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<CleanResult, String> {
+        let free_before = disk_free_gb();
+        let catalog = catalog_defs();
+        let target = catalog
+            .iter()
+            .find(|t| t.id == target_id)
+            .ok_or_else(|| format!("Unknown target: {target_id}"))?;
+        let item = target
+            .subitems
+            .iter()
+            .find(|i| i.id == item_id)
+            .ok_or_else(|| format!("Unknown item: {item_id}"))?;
 
-    if item.requires_double_confirm && !confirmed {
-        return Err("This item requires explicit confirmation.".to_string());
-    }
+        if item.requires_double_confirm && !confirmed {
+            return Err("This item requires explicit confirmation.".to_string());
+        }
 
-    Ok(clean_result(run_bash(&item.command), free_before))
+        Ok(clean_result(run_bash(&item.command), free_before))
+    })
+    .await
+    .map_err(|e| format!("cleanup task failed: {e}"))?
 }
 
 #[tauri::command]
