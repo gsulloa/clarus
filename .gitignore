@@ -2,6 +2,7 @@
 .context/
 .env
 .env.*
+.envrc
 !.env.example
 node_modules/
 dist/

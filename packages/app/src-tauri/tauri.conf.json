@@ -37,8 +37,10 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://releases.clarus.gulloa.click/latest.json"],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBQkJENUI4RUYyNTczOUMKUldTY2N5WHZ1Tlc3T2d1K1ZsOS95a2RpbXR6WFJHUW1FWTBZQ0phS0UwWUlFM1dpTVdXWlhzb2wK"
+      "endpoints": [
+        "https://releases.clarus.gulloa.click/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJEQjZFOEZENTVDMjI5RjQKUldUMEtjSlYvZWkydlE0NTlSNzByMHZ1SnZTazBBZUhXU2hFcTJYTGhXNXFZZmlZMXgvNytncUoK"
     }
   }
 }
