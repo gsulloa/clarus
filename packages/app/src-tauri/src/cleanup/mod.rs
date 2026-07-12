@@ -454,6 +454,7 @@ pub fn catalog_defs() -> Vec<Target> {
         .into_target(),
     );
 
+    targets.push(conductor_artifacts_target());
     targets.push(conductor_target());
     targets.push(android_images_target());
 
@@ -780,16 +781,95 @@ fn nvm_target() -> Target {
     .into_target()
 }
 
-/// Conductor worktrees — each workspace individually, double-confirm if dirty.
+/// Returns true if `path` is a git repo or worktree (has a `.git` entry).
+fn is_git_dir(path: &std::path::Path) -> bool {
+    path.join(".git").exists()
+}
+
+/// Returns true if `path` is a project container: no own `.git`, but at least
+/// one immediate subdir that does have `.git`.
+fn is_project_container(path: &std::path::Path) -> bool {
+    if is_git_dir(path) {
+        return false;
+    }
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().is_dir() && is_git_dir(&e.path()))
+        })
+        .unwrap_or(false)
+}
+
+/// Enumerate individual workspace paths under `dir`.
+/// Project containers (no own .git but children have .git) are expanded one
+/// level; everything else is added directly.
+fn enumerate_workspaces(dir: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut top: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+    top.sort();
+    for entry in top {
+        if is_project_container(&entry) {
+            let Ok(children) = std::fs::read_dir(&entry) else {
+                continue;
+            };
+            let mut ws: Vec<_> = children
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.path())
+                .collect();
+            ws.sort();
+            out.extend(ws);
+        } else {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// Build label and id for a workspace path rooted at `workspaces_dir`.
+fn workspace_label_id(ws: &std::path::Path, workspaces_dir: &str) -> (String, String) {
+    let name = ws
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| ws.to_string_lossy().to_string());
+    let parent = ws
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let workspaces_leaf = std::path::Path::new(workspaces_dir)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspaces".to_string());
+    let label = if parent == workspaces_leaf {
+        name.clone()
+    } else {
+        format!("{parent}/{name}")
+    };
+    // Use __ separator to avoid collisions between project containers whose
+    // workspaces share the same name (e.g. backend/kingston-v2 vs clarus/kingston-v2).
+    let id = format!("{parent}__{name}");
+    (label, id)
+}
+
+/// Conductor workspaces — each workspace individually, double-confirm if dirty.
 fn conductor_target() -> Target {
     let dir = format!("{}/conductor/workspaces", home());
     if !path_exists(&dir) {
         return Def {
             id: "conductor",
-            name: "Conductor worktrees",
+            name: "Conductor workspaces",
             tier: Tier::Two,
             path: None,
-            reason: "Per-workspace git worktrees created by Conductor.",
+            reason: "Per-project git worktrees created by Conductor.",
             risk_note: "Deleting a workspace removes its files permanently.",
             caveat: None,
             requires_double_confirm: false,
@@ -800,52 +880,140 @@ fn conductor_target() -> Target {
         .into_target();
     }
 
+    let workspaces = enumerate_workspaces(&dir);
     let mut subitems = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        let mut dirs: Vec<_> = entries
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.path())
-            .collect();
-        dirs.sort();
-        for ws in dirs {
-            let ws_str = ws.to_string_lossy().to_string();
-            let name = ws
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| ws_str.clone());
-            let branch = run_bash(&format!("git -C '{ws_str}' branch --show-current 2>/dev/null"))
-                .map(|s| s.trim().to_string())
+
+    for ws in &workspaces {
+        let ws_str = ws.to_string_lossy().to_string();
+        let (label, id) = workspace_label_id(ws, &dir);
+        let branch = run_bash(&format!("git -C '{ws_str}' branch --show-current 2>/dev/null"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let status_out =
+            run_bash(&format!("git -C '{ws_str}' status --porcelain 2>/dev/null"))
                 .unwrap_or_default();
-            let status_out = run_bash(&format!("git -C '{ws_str}' status --porcelain 2>/dev/null"))
-                .unwrap_or_default();
-            let dirty = !status_out.trim().is_empty();
-            let meta = format!(
-                "{} · {}",
-                if branch.is_empty() { "no-git".to_string() } else { branch },
-                if dirty { "uncommitted changes" } else { "clean" }
-            );
-            subitems.push(Item {
-                id: name.clone(),
-                label: name.clone(),
-                path: ws_str.clone(),
-                size_bytes: 0,
-                size_human: String::new(),
-                meta: Some(meta),
-                requires_double_confirm: dirty,
-                command: format!("rm -rf '{ws_str}'"),
-            });
-        }
+        let dirty = !status_out.trim().is_empty();
+        let meta = format!(
+            "{} · {}",
+            if branch.is_empty() { "no-git".to_string() } else { branch },
+            if dirty { "uncommitted changes" } else { "clean" }
+        );
+        subitems.push(Item {
+            id,
+            label,
+            path: ws_str.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: Some(meta),
+            requires_double_confirm: dirty,
+            command: format!("rm -rf '{ws_str}'"),
+        });
     }
 
     Def {
         id: "conductor",
-        name: "Conductor worktrees",
+        name: "Conductor workspaces",
         tier: Tier::Two,
         path: None,
-        reason: "Per-workspace git worktrees created by Conductor.",
+        reason: "Per-project git worktrees created by Conductor.",
         risk_note: "Deleting a workspace removes its files permanently.",
         caveat: Some("Workspaces with uncommitted changes require a second confirmation."),
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// Regenerable artifact directories that live inside workspaces.
+const ARTIFACT_DIRS: &[&str] = &[
+    "node_modules",
+    ".next",
+    "dist",
+    "cdk.out",
+    ".turbo",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    ".cache",
+    ".parcel-cache",
+];
+
+/// Shell command that deletes all artifact dirs inside `ws_str` without
+/// descending into already-matched dirs.
+fn artifact_clean_cmd(ws_str: &str) -> String {
+    let name_expr: String = ARTIFACT_DIRS
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            if i == 0 {
+                format!("-name '{d}'")
+            } else {
+                format!(" -o -name '{d}'")
+            }
+        })
+        .collect();
+    format!(
+        "find '{ws_str}' -maxdepth 6 -type d \\( {name_expr} \\) -prune -exec rm -rf {{}} + 2>/dev/null; true"
+    )
+}
+
+/// Conductor — regenerable artifacts inside each workspace (node_modules, .next, dist, …).
+fn conductor_artifacts_target() -> Target {
+    let dir = format!("{}/conductor/workspaces", home());
+    if !path_exists(&dir) {
+        return Def {
+            id: "conductor-artifacts",
+            name: "Conductor — regenerable artifacts",
+            tier: Tier::One,
+            path: None,
+            reason: "Build outputs and dependency dirs inside Conductor workspaces.",
+            risk_note: "Fully regenerable — reinstall/rebuild to recreate.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let workspaces = enumerate_workspaces(&dir);
+    let mut subitems = Vec::new();
+
+    for ws in &workspaces {
+        let ws_str = ws.to_string_lossy().to_string();
+        let (label, name_id) = workspace_label_id(ws, &dir);
+        subitems.push(Item {
+            id: format!("artifacts__{name_id}"),
+            label,
+            // Empty path so the scanner doesn't re-du the whole workspace;
+            // showing workspace total as "artifact size" would be misleading.
+            path: String::new(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: Some("node_modules · .next · dist · target · cdk.out · …".to_string()),
+            requires_double_confirm: false,
+            command: artifact_clean_cmd(&ws_str),
+        });
+    }
+
+    Def {
+        id: "conductor-artifacts",
+        name: "Conductor — regenerable artifacts",
+        tier: Tier::One,
+        path: None,
+        reason: "Build outputs and dependency dirs inside Conductor workspaces \
+                 (node_modules, .next, dist, target, cdk.out, …).",
+        risk_note: "Fully regenerable — reinstall/rebuild to recreate.",
+        caveat: Some("Freed space shown in the disk meter after cleaning."),
         requires_double_confirm: false,
         command: None,
         status: if subitems.is_empty() {
