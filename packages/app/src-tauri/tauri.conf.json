@@ -32,6 +32,13 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "category": "Utility",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "shortDescription": "Precise local disk intelligence",
     "longDescription": "Clarus is a calm desktop advisor for understanding disk usage and reviewing optimization candidates before any file operation."
   },
