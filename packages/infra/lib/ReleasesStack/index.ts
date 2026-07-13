@@ -6,6 +6,7 @@ import { ICertificate } from "aws-cdk-lib/aws-certificatemanager";
 import { ARecord, AaaaRecord, IHostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
 import { CloudFrontTarget } from "aws-cdk-lib/aws-route53-targets";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 import {
@@ -144,6 +145,22 @@ export class ReleasesStack extends cdk.Stack {
         ],
       }),
     );
+
+    // SSM parameters let the local .envrc resolve release infra dynamically
+    // (same pattern as Argus/TokenWatch), so bucket/distribution/role are never
+    // hardcoded in the local environment.
+    new ssm.StringParameter(this, "ReleaseBucketNameParam", {
+      parameterName: `/${PROJECT_NAME}/releases/bucket-name`,
+      stringValue: bucket.bucketName,
+    });
+    new ssm.StringParameter(this, "ReleaseDistributionIdParam", {
+      parameterName: `/${PROJECT_NAME}/releases/distribution-id`,
+      stringValue: distribution.distributionId,
+    });
+    new ssm.StringParameter(this, "PublishRoleArnParam", {
+      parameterName: `/${PROJECT_NAME}/releases/publish-role-arn`,
+      stringValue: publishRole.roleArn,
+    });
 
     new cdk.CfnOutput(this, "ReleaseBucketName", { value: bucket.bucketName });
     new cdk.CfnOutput(this, "ReleaseDistributionId", {

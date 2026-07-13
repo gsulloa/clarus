@@ -22,26 +22,41 @@ pnpm infra:synth
 
 Clarus ships through signed Tauri bundles. Tag pushes matching `v*` run `.github/workflows/release.yml`, publish installers to GitHub Releases, build `latest.json` for Tauri autoupdate, build `download.json` for the landing page, and upload both to the releases bucket behind CloudFront.
 
-Required GitHub secrets:
+Required GitHub secrets (`gsulloa/clarus`):
 
-- `TAURI_UPDATER_PRIVATE_KEY`
-- `TAURI_UPDATER_KEY_PASSWORD`
-- `PUBLIC_URL_BASE`, expected to be `https://releases.clarus.gulloa.click`
-- `AWS_RELEASE_ROLE_ARN`
-- `AWS_REGION`
-- `RELEASE_S3_BUCKET`
-- `RELEASE_CLOUDFRONT_DISTRIBUTION_ID`
-- Apple signing and notarization secrets when macOS releases are enabled.
+- Apple signing / notarization (team-scoped, shared with the author's other
+  Tauri apps): `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+  `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+- Tauri updater signing (Clarus-specific): `TAURI_UPDATER_PRIVATE_KEY`,
+  `TAURI_UPDATER_KEY_PASSWORD`.
+- Release infra: `AWS_REGION`, `AWS_RELEASE_ROLE_ARN`, `RELEASE_S3_BUCKET`,
+  `RELEASE_CLOUDFRONT_DISTRIBUTION_ID`, and `PUBLIC_URL_BASE`
+  (`https://releases.clarus.gulloa.click`).
 
-This scaffold generated a local updater keypair for Clarus. The private key and
-password are intentionally outside git:
+### Local secrets (`.envrc`)
 
-- `.context/clarus-updater.key`
-- `.context/clarus-updater-password.txt`
+Local signed builds and manual publishing read credentials from a `.envrc` kept
+at the repo root and loaded by [direnv](https://direnv.net/). It is **git-ignored**
+and never committed. It exports the Apple credentials as literals, points
+`TAURI_SIGNING_PRIVATE_KEY` at `~/.tauri/clarus-updater.key`, sets `AWS_PROFILE`,
+`AWS_REGION`, and `PUBLIC_URL_BASE`, and resolves `RELEASE_S3_BUCKET` /
+`RELEASE_CLOUDFRONT_DISTRIBUTION_ID` / `AWS_RELEASE_ROLE_ARN` from the SSM
+parameters published by `ClarusReleasesStack`.
 
-Use those values for `TAURI_UPDATER_PRIVATE_KEY` and
-`TAURI_UPDATER_KEY_PASSWORD`, or generate a new pair and replace the public key
-in `packages/app/src-tauri/tauri.conf.json`.
+### Updater keypair
+
+The Tauri autoupdater keypair is provisioned (and rotated) with:
+
+```sh
+pnpm --filter clarus exec bash scripts/set-updater-keys.sh          # create or resync
+pnpm --filter clarus exec bash scripts/set-updater-keys.sh --rotate # new keypair
+```
+
+It generates the keypair at `~/.tauri/clarus-updater.key`, writes the public key
+into `packages/app/src-tauri/tauri.conf.json` (`plugins.updater.pubkey`), and sets
+the `TAURI_UPDATER_PRIVATE_KEY` / `TAURI_UPDATER_KEY_PASSWORD` GitHub secrets. Back
+up the private key — losing it forces a rotation that breaks update verification
+for already-installed clients.
 
 ## Infrastructure
 
