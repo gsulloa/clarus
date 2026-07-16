@@ -176,91 +176,70 @@ fn size_human(bytes: u64) -> String {
     format!("{value:.decimals$} {}", units[index])
 }
 
-/// Free space on the data volume, GB, matching the script's `df_free`.
-fn disk_free_gb() -> i64 {
-    let output = match Command::new("df")
+/// Disk usage of the data volume, captured from a single `df` snapshot.
+///
+/// `used` is intentionally derived as `total - free`, NOT read from `df`'s
+/// per-volume `Used` column. On APFS, `/System/Volumes/Data` is one volume in a
+/// shared container: the `Used` column reflects only that volume's attributed
+/// usage while `Size` is the whole container and `Avail` is container-wide free
+/// space net of reserved overhead, so `Used + Avail != Size`. Deriving
+/// `used = total - free` guarantees the three figures reconcile
+/// (`used + free = total`) for the readout — do NOT "restore" the column-2 read.
+#[derive(Debug, Clone)]
+struct DiskUsage {
+    free_gb: i64,
+    free_human: String,
+    total_gb: i64,
+    total_human: String,
+    used_gb: i64,
+    used_human: String,
+}
+
+/// Read used/free/total for the data volume from a single `df -g` snapshot.
+///
+/// All figures come from one invocation so they are mutually consistent, and the
+/// human strings are formatted from the same GiB integers so the displayed
+/// values always sum (`used + free = total`). See `DiskUsage` for why `used` is
+/// derived rather than read from `df`'s `Used` column.
+fn disk_usage() -> DiskUsage {
+    // Single snapshot. `-g` reports whole GiB blocks; column order on macOS is
+    // 0=Filesystem, 1=Size, 2=Used, 3=Avail, 4=Capacity.
+    let text = Command::new("df")
         .arg("-g")
         .arg("/System/Volumes/Data")
         .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let field_gb = |index: usize| {
+        parse_df_field_at(&text, index)
+            .and_then(|f| f.parse::<i64>().ok())
+            .unwrap_or(0)
     };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
-        .and_then(|f| f.parse::<i64>().ok())
-        .unwrap_or(0)
+
+    let total_gb = field_gb(1);
+    let free_gb = field_gb(3);
+    let used_gb = (total_gb - free_gb).max(0);
+
+    DiskUsage {
+        free_gb,
+        free_human: gib_human(free_gb),
+        total_gb,
+        total_human: gib_human(total_gb),
+        used_gb,
+        used_human: gib_human(used_gb),
+    }
 }
 
-/// Free space human string, matching the script's `df_free_human`.
-fn disk_free_human() -> String {
-    let output = match Command::new("df")
-        .arg("-h")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return "?".to_string(),
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// Total capacity of the data volume, GB, from the `Size` column.
-fn disk_total_gb() -> i64 {
-    let output = match Command::new("df")
-        .arg("-g")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
-        .and_then(|f| f.parse::<i64>().ok())
-        .unwrap_or(0)
-}
-
-/// Total capacity human string, from the `Size` column.
-fn disk_total_human() -> String {
-    let output = match Command::new("df")
-        .arg("-h")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return "?".to_string(),
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// Used space on the data volume, GB, from the `Used` column.
-fn disk_used_gb() -> i64 {
-    let output = match Command::new("df")
-        .arg("-g")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
-        .and_then(|f| f.parse::<i64>().ok())
-        .unwrap_or(0)
-}
-
-/// Used space human string, from the `Used` column.
-fn disk_used_human() -> String {
-    let output = match Command::new("df")
-        .arg("-h")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return "?".to_string(),
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
-        .unwrap_or_else(|| "?".to_string())
+/// Format a whole-GiB integer the way `df -h` would (Gi, then Ti past 1024 GiB),
+/// so used/free/total read as a consistent set derived from the same snapshot.
+fn gib_human(gib: i64) -> String {
+    if gib >= 1024 {
+        format!("{:.1}Ti", gib as f64 / 1024.0)
+    } else {
+        format!("{gib}Gi")
+    }
 }
 
 /// `df` output: second line, Nth whitespace field.
@@ -1514,12 +1493,7 @@ fn measure(target: &mut Target) {
 #[tauri::command]
 pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanupScan, String> {
-        let free_before_gb = disk_free_gb();
-        let free_before_human = disk_free_human();
-        let total_before_gb = disk_total_gb();
-        let total_before_human = disk_total_human();
-        let used_before_gb = disk_used_gb();
-        let used_before_human = disk_used_human();
+        let usage = disk_usage();
 
         let mut targets = catalog_defs();
 
@@ -1541,12 +1515,12 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
         });
 
         Ok(CleanupScan {
-            free_before_gb,
-            free_before_human,
-            total_before_gb,
-            total_before_human,
-            used_before_gb,
-            used_before_human,
+            free_before_gb: usage.free_gb,
+            free_before_human: usage.free_human,
+            total_before_gb: usage.total_gb,
+            total_before_human: usage.total_human,
+            used_before_gb: usage.used_gb,
+            used_before_human: usage.used_human,
             targets,
         })
     })
@@ -1555,34 +1529,30 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
 }
 
 fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
-    let free_gb = disk_free_gb();
-    let free_human = disk_free_human();
-    let total_gb = disk_total_gb();
-    let total_human = disk_total_human();
-    let used_gb = disk_used_gb();
-    let used_human = disk_used_human();
+    let usage = disk_usage();
+    let freed_gb = usage.free_gb - free_before;
     match run {
         Ok(msg) => CleanResult {
             ok: true,
             message: Some(msg),
-            free_gb,
-            free_human,
-            freed_gb: free_gb - free_before,
-            total_gb,
-            total_human,
-            used_gb,
-            used_human,
+            free_gb: usage.free_gb,
+            free_human: usage.free_human,
+            freed_gb,
+            total_gb: usage.total_gb,
+            total_human: usage.total_human,
+            used_gb: usage.used_gb,
+            used_human: usage.used_human,
         },
         Err(msg) => CleanResult {
             ok: false,
             message: Some(msg),
-            free_gb,
-            free_human,
-            freed_gb: free_gb - free_before,
-            total_gb,
-            total_human,
-            used_gb,
-            used_human,
+            free_gb: usage.free_gb,
+            free_human: usage.free_human,
+            freed_gb,
+            total_gb: usage.total_gb,
+            total_human: usage.total_human,
+            used_gb: usage.used_gb,
+            used_human: usage.used_human,
         },
     }
 }
@@ -1590,7 +1560,7 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
 #[tauri::command]
 pub async fn clean_target(id: String, confirmed: bool) -> Result<CleanResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanResult, String> {
-        let free_before = disk_free_gb();
+        let free_before = disk_usage().free_gb;
         let catalog = catalog_defs();
         let target = catalog
             .iter()
@@ -1618,7 +1588,7 @@ pub async fn clean_item(
     confirmed: bool,
 ) -> Result<CleanResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanResult, String> {
-        let free_before = disk_free_gb();
+        let free_before = disk_usage().free_gb;
         let catalog = catalog_defs();
         let target = catalog
             .iter()
@@ -1642,17 +1612,17 @@ pub async fn clean_item(
 
 #[tauri::command]
 pub fn disk_free() -> Result<CleanResult, String> {
-    let free_gb = disk_free_gb();
+    let usage = disk_usage();
     Ok(CleanResult {
         ok: true,
         message: None,
-        free_gb,
-        free_human: disk_free_human(),
+        free_gb: usage.free_gb,
+        free_human: usage.free_human,
         freed_gb: 0,
-        total_gb: disk_total_gb(),
-        total_human: disk_total_human(),
-        used_gb: disk_used_gb(),
-        used_human: disk_used_human(),
+        total_gb: usage.total_gb,
+        total_human: usage.total_human,
+        used_gb: usage.used_gb,
+        used_human: usage.used_human,
     })
 }
 
