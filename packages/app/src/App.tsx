@@ -71,6 +71,10 @@ export function App() {
   const [freeBeforeHuman, setFreeBeforeHuman] = useState<string>("—");
   const [freeNow, setFreeNow] = useState<number | null>(null);
   const [freeNowHuman, setFreeNowHuman] = useState<string>("—");
+  const [usedNow, setUsedNow] = useState<number | null>(null);
+  const [usedNowHuman, setUsedNowHuman] = useState<string>("—");
+  const [totalNow, setTotalNow] = useState<number | null>(null);
+  const [totalNowHuman, setTotalNowHuman] = useState<string>("—");
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -97,6 +101,11 @@ export function App() {
 
   const freedTotal =
     freeNow !== null && freeBefore !== null ? freeNow - freeBefore : 0;
+
+  const capacityPct =
+    usedNow !== null && totalNow !== null && totalNow > 0
+      ? Math.min(100, Math.max(0, (usedNow / totalNow) * 100))
+      : 0;
 
   async function runScan() {
     setScanState("scanning");
@@ -139,6 +148,10 @@ export function App() {
       setFreeBeforeHuman(scan.freeBeforeHuman);
       setFreeNow(scan.freeBeforeGb);
       setFreeNowHuman(scan.freeBeforeHuman);
+      setUsedNow(scan.usedBeforeGb);
+      setUsedNowHuman(scan.usedBeforeHuman);
+      setTotalNow(scan.totalBeforeGb);
+      setTotalNowHuman(scan.totalBeforeHuman);
       setSelectedId((prev) => prev ?? scan.targets[0]?.id ?? null);
       setScanState("complete");
     } catch (err) {
@@ -153,6 +166,10 @@ export function App() {
   function applyResult(key: string, result: CleanResult) {
     setFreeNow(result.freeGb);
     setFreeNowHuman(result.freeHuman);
+    setUsedNow(result.usedGb);
+    setUsedNowHuman(result.usedHuman);
+    setTotalNow(result.totalGb);
+    setTotalNowHuman(result.totalHuman);
     setActions((prev) => ({
       ...prev,
       [key]: result.ok
@@ -283,7 +300,34 @@ export function App() {
         </section>
 
         <section className="rail-section">
-          <p className="section-label">Disk free · data volume</p>
+          <p className="section-label">Disk usage · data volume</p>
+          <div className="disk-readout">
+            <div className="disk-line">
+              <span>Used</span>
+              <strong>{usedNowHuman}</strong>
+            </div>
+            <div className="disk-line">
+              <span>Free</span>
+              <strong>{freeNowHuman}</strong>
+            </div>
+            <div className="disk-line">
+              <span>Total</span>
+              <strong>{totalNowHuman}</strong>
+            </div>
+          </div>
+          <div
+            className="capacity-bar"
+            role="progressbar"
+            aria-label="Disk capacity used"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(capacityPct)}
+          >
+            <div
+              className="capacity-bar-fill"
+              style={{ width: `${capacityPct}%` }}
+            />
+          </div>
           <div className="disk-readout">
             <div className="disk-line">
               <span>Before</span>
