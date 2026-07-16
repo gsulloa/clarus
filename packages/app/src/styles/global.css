@@ -226,6 +226,21 @@ h3 {
   color: var(--accent);
 }
 
+.capacity-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.capacity-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 240ms cubic-bezier(0.2, 0, 0, 1);
+}
+
 /* Center surface */
 .intelligence-surface {
   padding: 30px;
@@ -729,6 +744,9 @@ body {
     background: var(--surface-strong);
   }
   .scan-progress-fill {
+    transition: none;
+  }
+  .capacity-bar-fill {
     transition: none;
   }
 }

@@ -34,6 +34,10 @@ export type CleanupTarget = {
 export type CleanupScan = {
   freeBeforeGb: number;
   freeBeforeHuman: string;
+  totalBeforeGb: number;
+  totalBeforeHuman: string;
+  usedBeforeGb: number;
+  usedBeforeHuman: string;
   targets: CleanupTarget[];
 };
 
@@ -43,6 +47,10 @@ export type CleanResult = {
   freeGb: number;
   freeHuman: string;
   freedGb: number;
+  totalGb: number;
+  totalHuman: string;
+  usedGb: number;
+  usedHuman: string;
 };
 
 export const TIER_LABELS: Record<Tier, string> = {

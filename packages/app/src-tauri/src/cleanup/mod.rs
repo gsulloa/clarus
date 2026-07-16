@@ -73,6 +73,10 @@ pub struct Target {
 pub struct CleanupScan {
     free_before_gb: i64,
     free_before_human: String,
+    total_before_gb: i64,
+    total_before_human: String,
+    used_before_gb: i64,
+    used_before_human: String,
     targets: Vec<Target>,
 }
 
@@ -84,6 +88,10 @@ pub struct CleanResult {
     free_gb: i64,
     free_human: String,
     freed_gb: i64,
+    total_gb: i64,
+    total_human: String,
+    used_gb: i64,
+    used_human: String,
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -178,7 +186,7 @@ fn disk_free_gb() -> i64 {
         Ok(o) => o,
         Err(_) => return 0,
     };
-    parse_df_field(&String::from_utf8_lossy(&output.stdout))
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
         .and_then(|f| f.parse::<i64>().ok())
         .unwrap_or(0)
 }
@@ -193,14 +201,74 @@ fn disk_free_human() -> String {
         Ok(o) => o,
         Err(_) => return "?".to_string(),
     };
-    parse_df_field(&String::from_utf8_lossy(&output.stdout)).unwrap_or_else(|| "?".to_string())
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
+        .unwrap_or_else(|| "?".to_string())
 }
 
-/// `df` output: second line, 4th field (Avail).
-fn parse_df_field(text: &str) -> Option<String> {
+/// Total capacity of the data volume, GB, from the `Size` column.
+fn disk_total_gb() -> i64 {
+    let output = match Command::new("df")
+        .arg("-g")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Total capacity human string, from the `Size` column.
+fn disk_total_human() -> String {
+    let output = match Command::new("df")
+        .arg("-h")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return "?".to_string(),
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Used space on the data volume, GB, from the `Used` column.
+fn disk_used_gb() -> i64 {
+    let output = match Command::new("df")
+        .arg("-g")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Used space human string, from the `Used` column.
+fn disk_used_human() -> String {
+    let output = match Command::new("df")
+        .arg("-h")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return "?".to_string(),
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// `df` output: second line, Nth whitespace field.
+/// Column order on macOS: 0=Filesystem, 1=Size, 2=Used, 3=Avail, 4=Capacity.
+fn parse_df_field_at(text: &str, index: usize) -> Option<String> {
     text.lines()
         .nth(1)
-        .and_then(|line| line.split_whitespace().nth(3))
+        .and_then(|line| line.split_whitespace().nth(index))
         .map(|s| s.to_string())
 }
 
@@ -386,12 +454,83 @@ pub fn catalog_defs() -> Vec<Target> {
         "bun pm cache rm 2>/dev/null || rm -rf ~/.bun/install/cache/*".to_string(),
     ));
 
+    targets.push(pnpm_store_target());
+
+    targets.push(tier1(
+        "gradle-caches",
+        "Gradle caches",
+        "~/.gradle/caches",
+        "Gradle's downloaded dependencies and build caches.",
+        Some("Stops the Gradle daemon first to release locks."),
+        "gradle --stop 2>/dev/null; rm -rf ~/.gradle/caches".to_string(),
+    ));
+
+    targets.push(tier1(
+        "gradle-wrapper",
+        "Gradle wrapper dists",
+        "~/.gradle/wrapper/dists",
+        "Gradle wrapper distributions downloaded per project.",
+        None,
+        "rm -rf ~/.gradle/wrapper/dists".to_string(),
+    ));
+
+    targets.push(tier1(
+        "gradle-daemon",
+        "Gradle daemon logs",
+        "~/.gradle/daemon",
+        "Gradle daemon logs and registry files.",
+        None,
+        "rm -rf ~/.gradle/daemon".to_string(),
+    ));
+
+    targets.push(webex_upgrades_target());
+
+    targets.push(tier1(
+        "slack-cache",
+        "Slack cache",
+        "~/Library/Application Support/Slack/Cache",
+        "Slack's on-disk web and service-worker caches.",
+        Some("Also clears Slack's Service Worker cache."),
+        "rm -rf ~/Library/Application\\ Support/Slack/Cache ~/Library/Application\\ Support/Slack/Service\\ Worker"
+            .to_string(),
+    ));
+
+    targets.push(tier1(
+        "claude-desktop-cache",
+        "Claude Desktop cache",
+        "~/Library/Application Support/Claude/Cache",
+        "Claude Desktop's web and code caches.",
+        Some("Also clears Claude Desktop's Code Cache."),
+        "rm -rf ~/Library/Application\\ Support/Claude/Cache ~/Library/Application\\ Support/Claude/Code\\ Cache"
+            .to_string(),
+    ));
+
+    targets.push(tier1(
+        "aws-toolkit-cache",
+        "AWS Toolkit cache",
+        "~/Library/Caches/aws",
+        "Cached data from the AWS Toolkit / AWS CLI.",
+        None,
+        "rm -rf ~/Library/Caches/aws".to_string(),
+    ));
+
+    targets.push(tier1(
+        "cursor-vsix-cache",
+        "Cursor cached VSIXs",
+        "~/Library/Application Support/Cursor/CachedExtensionVSIXs",
+        "Cached extension installer packages kept by Cursor.",
+        None,
+        "rm -rf ~/Library/Application\\ Support/Cursor/CachedExtensionVSIXs".to_string(),
+    ));
+
     // ── TIER 2 — regenerables ────────────────────────────────────
     targets.push(docker_prune_target());
     targets.push(docker_raw_target());
     targets.push(ios_unavailable_target());
     targets.push(ios_runtimes_target());
     targets.push(nvm_target());
+    targets.push(pyenv_target());
+    targets.push(ollama_target());
 
     targets.push(
         Def {
@@ -781,6 +920,251 @@ fn nvm_target() -> Target {
     .into_target()
 }
 
+/// pnpm content-addressable store — `pnpm store prune` when pnpm is present.
+fn pnpm_store_target() -> Target {
+    if !has_tool("pnpm") {
+        return Def {
+            id: "pnpm-store",
+            name: "pnpm store",
+            tier: Tier::One,
+            path: None,
+            reason: "pnpm's content-addressable package store.",
+            risk_note: "Pure cache — regenerated automatically by the owning tool.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::ToolMissing,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let store_path = run_bash("pnpm store path 2>/dev/null")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| expand("~/Library/pnpm"));
+
+    Def {
+        id: "pnpm-store",
+        name: "pnpm store",
+        tier: Tier::One,
+        path: Some(store_path),
+        reason: "pnpm's content-addressable package store.",
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat: Some("`pnpm store prune` removes only orphaned packages, so freed space may be less than the reported store size."),
+        requires_double_confirm: false,
+        command: Some("pnpm store prune".to_string()),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// Cisco Webex old upgrade payloads — keep the newest version directory.
+fn webex_upgrades_target() -> Target {
+    let dir = "~/Library/Application Support/Cisco Spark/Webexteams_upgrades_arm";
+    if !path_exists(dir) {
+        return Def {
+            id: "webex-upgrades",
+            name: "Cisco Webex old upgrades",
+            tier: Tier::One,
+            path: None,
+            reason: "Old Webex upgrade payloads; the newest version is kept.",
+            risk_note: "Pure cache — regenerated automatically by the owning tool.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    // Keep the newest (highest-versioned) directory, delete the rest.
+    // `sed '$d'` drops the last line after `sort -V` (BSD head lacks `-n -1`).
+    let command = "ls -d ~/Library/Application\\ Support/Cisco\\ Spark/Webexteams_upgrades_arm/*/ 2>/dev/null | sort -V | sed '$d' | tr '\\n' '\\0' | xargs -0 rm -rf";
+
+    Def {
+        id: "webex-upgrades",
+        name: "Cisco Webex old upgrades",
+        tier: Tier::One,
+        path: Some(dir.to_string()),
+        reason: "Old Webex upgrade payloads; the newest version is kept.",
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat: Some("The newest version directory is kept, so its size is included in the reported total but will not be freed."),
+        requires_double_confirm: false,
+        command: Some(command.to_string()),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// Old pyenv Python versions — keep the active version, offer the rest.
+fn pyenv_target() -> Target {
+    let pyenv_root = std::env::var("PYENV_ROOT").unwrap_or_else(|_| format!("{}/.pyenv", home()));
+    let versions_dir = format!("{pyenv_root}/versions");
+
+    if !path_exists(&versions_dir) {
+        return Def {
+            id: "pyenv",
+            name: "pyenv — old Python versions",
+            tier: Tier::Two,
+            path: None,
+            reason: "Python versions installed via pyenv.",
+            risk_note: "Regenerable — reinstall with `pyenv install` if needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let listing = run_bash(&format!("ls '{versions_dir}' 2>/dev/null | sort -V")).unwrap_or_default();
+    let versions: Vec<String> = listing
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+
+    // Active version (falls back to the newest installed if pyenv can't report).
+    let active = run_bash("pyenv version-name 2>/dev/null")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty() && s != "system")
+        .or_else(|| versions.last().cloned())
+        .unwrap_or_default();
+
+    let mut subitems = Vec::new();
+    for v in &versions {
+        if *v == active {
+            continue;
+        }
+        let path = format!("{versions_dir}/{v}");
+        subitems.push(Item {
+            id: v.clone(),
+            label: v.clone(),
+            path: path.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: false,
+            command: format!("pyenv uninstall -f '{v}' 2>&1 || rm -rf '{path}'"),
+        });
+    }
+
+    Def {
+        id: "pyenv",
+        name: "pyenv — old Python versions",
+        tier: Tier::Two,
+        path: None,
+        reason: format!(
+            "Old Python versions (keeping active {}).",
+            if active.is_empty() { "?" } else { &active }
+        )
+        .leak(),
+        risk_note: "Regenerable — reinstall with `pyenv install` if needed.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// Parse a human-readable size (e.g. `4.7 GB`) into bytes, base 1024.
+fn parse_human_size(value: &str, unit: &str) -> u64 {
+    let Ok(num) = value.parse::<f64>() else {
+        return 0;
+    };
+    let multiplier = match unit.to_ascii_uppercase().as_str() {
+        "B" => 1.0,
+        "KB" => 1024.0,
+        "MB" => 1024f64.powi(2),
+        "GB" => 1024f64.powi(3),
+        "TB" => 1024f64.powi(4),
+        _ => return 0,
+    };
+    (num * multiplier) as u64
+}
+
+/// Ollama models — one deletable subitem per model from `ollama list`.
+fn ollama_target() -> Target {
+    if !has_tool("ollama") {
+        return Def {
+            id: "ollama",
+            name: "Ollama models",
+            tier: Tier::Two,
+            path: None,
+            reason: "Local models pulled by Ollama.",
+            risk_note: "Regenerable — re-pull with `ollama pull` if needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let listing = run_bash("ollama list 2>/dev/null").unwrap_or_default();
+    let mut subitems = Vec::new();
+    for line in listing.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("NAME") {
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        let Some(name) = tokens.first() else {
+            continue;
+        };
+        // Columns: NAME  ID  SIZE_value  SIZE_unit  MODIFIED...
+        let size_bytes = if tokens.len() >= 4 {
+            parse_human_size(tokens[2], tokens[3])
+        } else {
+            0
+        };
+        subitems.push(Item {
+            id: (*name).to_string(),
+            label: (*name).to_string(),
+            path: String::new(),
+            size_bytes,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: false,
+            command: format!("ollama rm '{name}'"),
+        });
+    }
+
+    Def {
+        id: "ollama",
+        name: "Ollama models",
+        tier: Tier::Two,
+        path: None,
+        reason: "Local models pulled by Ollama.",
+        risk_note: "Regenerable — re-pull with `ollama pull` if needed.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
 /// Returns true if `path` is a git repo or worktree (has a `.git` entry).
 fn is_git_dir(path: &std::path::Path) -> bool {
     path.join(".git").exists()
@@ -1132,6 +1516,10 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanupScan, String> {
         let free_before_gb = disk_free_gb();
         let free_before_human = disk_free_human();
+        let total_before_gb = disk_total_gb();
+        let total_before_human = disk_total_human();
+        let used_before_gb = disk_used_gb();
+        let used_before_human = disk_used_human();
 
         let mut targets = catalog_defs();
 
@@ -1155,6 +1543,10 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
         Ok(CleanupScan {
             free_before_gb,
             free_before_human,
+            total_before_gb,
+            total_before_human,
+            used_before_gb,
+            used_before_human,
             targets,
         })
     })
@@ -1165,6 +1557,10 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
 fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
     let free_gb = disk_free_gb();
     let free_human = disk_free_human();
+    let total_gb = disk_total_gb();
+    let total_human = disk_total_human();
+    let used_gb = disk_used_gb();
+    let used_human = disk_used_human();
     match run {
         Ok(msg) => CleanResult {
             ok: true,
@@ -1172,6 +1568,10 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
             free_gb,
             free_human,
             freed_gb: free_gb - free_before,
+            total_gb,
+            total_human,
+            used_gb,
+            used_human,
         },
         Err(msg) => CleanResult {
             ok: false,
@@ -1179,6 +1579,10 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
             free_gb,
             free_human,
             freed_gb: free_gb - free_before,
+            total_gb,
+            total_human,
+            used_gb,
+            used_human,
         },
     }
 }
@@ -1245,5 +1649,84 @@ pub fn disk_free() -> Result<CleanResult, String> {
         free_gb,
         free_human: disk_free_human(),
         freed_gb: 0,
+        total_gb: disk_total_gb(),
+        total_human: disk_total_human(),
+        used_gb: disk_used_gb(),
+        used_human: disk_used_human(),
     })
+}
+
+// ─────────────────────────────────────────────────────────────────
+// TESTS  (composition only — catalog_defs does detection, never deletes)
+// ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find<'a>(targets: &'a [Target], id: &str) -> &'a Target {
+        targets
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("target `{id}` missing from catalog"))
+    }
+
+    #[test]
+    fn new_tier1_targets_present() {
+        let targets = catalog_defs();
+        for id in [
+            "pnpm-store",
+            "gradle-caches",
+            "gradle-wrapper",
+            "gradle-daemon",
+            "webex-upgrades",
+            "slack-cache",
+            "claude-desktop-cache",
+            "aws-toolkit-cache",
+            "cursor-vsix-cache",
+        ] {
+            assert_eq!(find(&targets, id).tier, Tier::One, "{id} should be Tier 1");
+        }
+    }
+
+    #[test]
+    fn new_tier2_container_targets_present() {
+        let targets = catalog_defs();
+        for id in ["pyenv", "ollama"] {
+            let t = find(&targets, id);
+            assert_eq!(t.tier, Tier::Two, "{id} should be Tier 2");
+            // Container targets act per-subitem, so the target itself has no command.
+            assert!(t.command.is_none(), "{id} should have no top-level command");
+        }
+    }
+
+    #[test]
+    fn webex_keeps_newest_via_sed() {
+        let targets = catalog_defs();
+        let webex = find(&targets, "webex-upgrades");
+        if let Some(cmd) = &webex.command {
+            // BSD head lacks `-n -1`; keep-newest is done with `sed '$d'`.
+            assert!(cmd.contains("sort -V"), "webex command should sort by version");
+            assert!(cmd.contains("sed '$d'"), "webex command should drop the newest with sed");
+            assert!(!cmd.contains("head -n -1"), "webex must not use non-portable head");
+        }
+    }
+
+    #[test]
+    fn notion_is_the_only_tier3_notion() {
+        let targets = catalog_defs();
+        let notion_count = targets.iter().filter(|t| t.id == "notion").count();
+        assert_eq!(notion_count, 1, "notion should appear exactly once (no duplicate)");
+        assert_eq!(find(&targets, "notion").tier, Tier::Three);
+    }
+
+    #[test]
+    fn parse_human_size_handles_common_units() {
+        assert_eq!(parse_human_size("6.6", "GB"), (6.6 * 1024f64.powi(3)) as u64);
+        assert_eq!(parse_human_size("512", "MB"), 512 * 1024 * 1024);
+        assert_eq!(parse_human_size("1", "TB"), 1024u64.pow(4));
+        // Garbled input degrades to 0 rather than panicking.
+        assert_eq!(parse_human_size("abc", "GB"), 0);
+        assert_eq!(parse_human_size("4.1", "??"), 0);
+    }
 }
