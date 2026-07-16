@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleSlash,
+  Download,
   HardDrive,
   Loader2,
   RefreshCw,
@@ -349,19 +350,44 @@ export function App() {
           <button
             className="quiet-action"
             type="button"
+            disabled={
+              updater.current === "checking" ||
+              updater.current === "downloading" ||
+              updater.current === "downloaded"
+            }
             onClick={() => void updater.checkNow()}
           >
             <RefreshCw size={16} />
             Check for updates
           </button>
+          {updater.current === "available" ||
+          updater.current === "downloading" ||
+          updater.current === "downloaded" ? (
+            <button
+              className="scan-action"
+              type="button"
+              disabled={
+                updater.current === "downloading" ||
+                updater.current === "downloaded"
+              }
+              onClick={() => void updater.downloadAndInstall()}
+            >
+              <Download size={16} />
+              Update now
+            </button>
+          ) : null}
           <p className="muted-copy">
             {updater.current === "available" && updater.version
               ? `Version ${updater.version} is available.`
               : updater.current === "checking"
                 ? "Checking signed release manifest…"
-                : updater.current === "error"
-                  ? "Updater manifest is not reachable yet."
-                  : "Release channel is configured."}
+                : updater.current === "downloading"
+                  ? "Downloading update…"
+                  : updater.current === "downloaded"
+                    ? "Restarting to finish update…"
+                    : updater.current === "error"
+                      ? "Updater manifest is not reachable yet."
+                      : "Release channel is configured."}
           </p>
         </section>
       </aside>
