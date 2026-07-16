@@ -1,0 +1,639 @@
+/* Clarus landing page — hand-authored, zero-build.
+   Tokens copied verbatim from DESIGN.md "Implementation Tokens". */
+
+:root {
+  color-scheme: dark;
+
+  /* Color */
+  --bg-base: #081014;
+  --bg-deep: #02080b;
+  --text-primary: #e7eef2;
+  --text-secondary: #8ea0a8;
+  --text-tertiary: #7f929a;
+  --accent: #2ee8d6;
+  --accent-text: #aefbf3;
+  --ink-on-accent: #061012;
+  --danger: #ffb4a8;
+  --warning: #f5c451;
+  --info: #8ebbff;
+  --border: rgba(231, 238, 242, 0.11);
+  --border-strong: rgba(231, 238, 242, 0.14);
+  --surface: rgba(231, 238, 242, 0.055);
+  --surface-strong: rgba(231, 238, 242, 0.07);
+  --accent-soft: rgba(46, 232, 214, 0.09);
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-pill: 999px;
+
+  /* Spacing (base unit 4px) */
+  --space-2xs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 30px;
+  --space-3xl: 38px;
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --duration-hover: 80ms;
+  --duration-entrance: 240ms;
+
+  /* Typography */
+  --font-display:
+    "Satoshi", "General Sans", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body:
+    "Geist", "Source Sans 3", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: inherit;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+/* Focus visibility — every interactive element */
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+
+.skip-link {
+  position: absolute;
+  top: -48px;
+  left: var(--space-lg);
+  z-index: 100;
+  background: var(--accent);
+  color: var(--ink-on-accent);
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-md);
+  font-weight: 650;
+  text-decoration: none;
+  transition: top var(--duration-hover) var(--ease-standard);
+}
+
+.skip-link:focus {
+  top: var(--space-lg);
+}
+
+.wrap {
+  width: min(1040px, calc(100% - 48px));
+  margin-inline: auto;
+}
+
+@media (max-width: 480px) {
+  .wrap {
+    width: calc(100% - 32px);
+  }
+}
+
+/* ---------- Header ---------- */
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(8, 16, 20, 0.86);
+  backdrop-filter: saturate(140%) blur(10px);
+}
+
+.site-header .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-block: var(--space-md);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  text-decoration: none;
+  font-family: var(--font-display);
+  font-weight: 650;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+}
+
+.brand svg {
+  width: 28px;
+  height: 28px;
+}
+
+.header-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--text-primary);
+  transition:
+    border-color var(--duration-hover) var(--ease-standard),
+    background-color var(--duration-hover) var(--ease-standard);
+}
+
+.header-cta:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ---------- Hero ---------- */
+
+.hero {
+  padding-block: clamp(56px, 10vw, 108px) var(--space-3xl);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  overflow: clip;
+}
+
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: -20% -10% auto -10%;
+  height: 480px;
+  background: radial-gradient(
+    ellipse at top,
+    var(--accent-soft),
+    transparent 60%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero::before {
+    display: none;
+  }
+}
+
+.hero .wrap {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-mark {
+  width: 64px;
+  height: 64px;
+  margin-bottom: var(--space-xl);
+}
+
+.eyebrow {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-md);
+}
+
+.hero h1 {
+  font-family: var(--font-display);
+  font-weight: 650;
+  font-size: clamp(40px, 7vw, 56px);
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.hero-lede {
+  margin-top: var(--space-lg);
+  max-width: 620px;
+  font-size: clamp(17px, 2.2vw, 20px);
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.hero-actions {
+  margin-top: var(--space-xl);
+}
+
+/* ---------- Download region (shared: hero + final block) ---------- */
+
+.download-region {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-lg);
+}
+
+.download-primary {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 52px;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-md) var(--space-xl);
+  background: var(--accent);
+  color: var(--ink-on-accent);
+  text-decoration: none;
+  transition:
+    transform var(--duration-hover) var(--ease-standard),
+    box-shadow var(--duration-hover) var(--ease-standard);
+}
+
+.download-primary:hover {
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.download-primary:active {
+  transform: translateY(1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .download-primary {
+    transition: none;
+  }
+}
+
+.download-primary-label {
+  font-weight: 750;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+.download-primary-meta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  color: var(--ink-on-accent);
+  opacity: 0.78;
+}
+
+.download-note {
+  align-self: center;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  max-width: 320px;
+}
+
+.download-note code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+/* Secondary "all platforms" link toggler under hero */
+.download-secondary-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-lg);
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+  transition: border-color var(--duration-hover) var(--ease-standard);
+}
+
+.download-secondary-link:hover {
+  border-color: var(--accent);
+}
+
+/* ---------- Sections ---------- */
+
+section {
+  padding-block: var(--space-3xl);
+  border-bottom: 1px solid var(--border);
+}
+
+.section-head {
+  max-width: 640px;
+  margin-bottom: var(--space-xl);
+}
+
+.section-head .eyebrow {
+  margin-bottom: var(--space-sm);
+}
+
+.section-head h2 {
+  font-family: var(--font-display);
+  font-weight: 650;
+  font-size: clamp(24px, 3.4vw, 30px);
+  letter-spacing: -0.01em;
+  margin-bottom: var(--space-md);
+}
+
+.section-head p {
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+/* Safety ladder */
+
+.ladder {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-lg);
+  counter-reset: step;
+}
+
+@media (max-width: 900px) {
+  .ladder {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 560px) {
+  .ladder {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ladder-step {
+  counter-increment: step;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-lg);
+  position: relative;
+}
+
+.ladder-step::before {
+  content: counter(step, decimal-leading-zero);
+  display: block;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-text);
+  margin-bottom: var(--space-sm);
+}
+
+.ladder-step h3 {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 650;
+  margin-bottom: var(--space-xs);
+  letter-spacing: -0.005em;
+}
+
+.ladder-step p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.ladder-arrow {
+  display: none;
+}
+
+/* Trust / evidence note */
+
+.trust-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-lg);
+}
+
+@media (max-width: 700px) {
+  .trust-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.trust-item {
+  display: flex;
+  gap: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-lg);
+}
+
+.trust-item svg {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+  margin-top: 2px;
+}
+
+.trust-item h3 {
+  font-size: 15px;
+  font-weight: 650;
+  margin-bottom: var(--space-xs);
+  color: var(--text-primary);
+}
+
+.trust-item p {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+/* Final download block */
+
+.download-block {
+  text-align: left;
+}
+
+.download-block .section-head {
+  max-width: 640px;
+}
+
+.all-platforms {
+  margin-top: var(--space-xl);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-deep);
+  overflow: clip;
+}
+
+.platform-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+  color: var(--text-primary);
+  transition: background-color var(--duration-hover) var(--ease-standard);
+}
+
+.platform-row:last-child {
+  border-bottom: none;
+}
+
+.platform-row:hover {
+  background: var(--accent-soft);
+}
+
+.platform-row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.platform-row-name {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.platform-row-filename {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+}
+
+.platform-row-size {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.all-platforms-empty {
+  padding: var(--space-lg);
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.mac-arch-note {
+  margin-top: var(--space-md);
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+.status-line {
+  margin-top: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+}
+
+/* ---------- Footer ---------- */
+
+.site-footer {
+  padding-block: var(--space-xl);
+}
+
+.site-footer .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.footer-links {
+  display: flex;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.footer-links a {
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+
+.footer-links a:hover {
+  color: var(--text-primary);
+}
+
+.footer-meta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ---------- Entrance motion (gated) ---------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero,
+  section {
+    animation: fade-in var(--duration-entrance) var(--ease-standard) both;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Visually-hidden helper for a11y-only text */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

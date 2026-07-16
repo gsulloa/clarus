@@ -3,85 +3,259 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Clarus</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        font-family:
-          ui-sans-serif,
-          system-ui,
-          -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          sans-serif;
-        background: #081014;
-        color: #e7eef2;
-      }
+    <title>Clarus — precise local disk intelligence</title>
+    <meta
+      name="description"
+      content="Precise local disk intelligence for reviewing optimization candidates before any file operation."
+    />
 
-      body {
-        margin: 0;
-        min-height: 100vh;
-        background:
-          linear-gradient(120deg, rgba(46, 232, 214, 0.12), transparent 32%),
-          #081014;
-      }
+    <!-- Marketing typography (DESIGN.md): Satoshi/General Sans display, Geist/Source Sans 3 body,
+         JetBrains Mono for data. Loaded from a CDN with preconnect + font-display: swap; the
+         system-UI stack is the default and remains fully readable if these never load. -->
+    <link rel="preconnect" href="https://api.fontshare.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://api.fontshare.com/v2/css?f[]=satoshi@700,500&f[]=general-sans@600,500&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&family=JetBrains+Mono:wght@400;600&family=Source+Sans+3:wght@400;600&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
 
-      main {
-        display: grid;
-        min-height: 100vh;
-        align-content: center;
-        width: min(960px, calc(100% - 48px));
-        margin: 0 auto;
-      }
-
-      svg {
-        width: 76px;
-        height: 76px;
-        margin-bottom: 26px;
-      }
-
-      h1 {
-        max-width: 760px;
-        margin: 0;
-        font-size: clamp(48px, 10vw, 104px);
-        line-height: 0.9;
-        letter-spacing: 0;
-      }
-
-      p {
-        max-width: 620px;
-        color: #9caeb5;
-        font-size: 20px;
-        line-height: 1.55;
-      }
-
-      a {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: fit-content;
-        min-height: 44px;
-        border: 1px solid rgba(46, 232, 214, 0.38);
-        border-radius: 8px;
-        padding: 0 16px;
-        color: #061012;
-        background: #2ee8d6;
-        font-weight: 750;
-        text-decoration: none;
-      }
-    </style>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main>
-      <svg viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <rect width="96" height="96" rx="22" fill="#081014" />
-        <path d="M48 17C31.4315 17 18 30.4315 18 47C18 63.5685 31.4315 77 48 77C61.0636 77 72.1787 68.6488 76.295 57" stroke="#E7EEF2" stroke-width="7" stroke-linecap="round" />
-        <path d="M32 62L67 27" stroke="#2EE8D6" stroke-width="7" stroke-linecap="round" />
-        <path d="M63 27H69V33" stroke="#2EE8D6" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" />
-      </svg>
-      <h1>Clarus</h1>
-      <p>Precise local disk intelligence for reviewing optimization candidates before any file operation.</p>
-      <a href="https://releases.clarus.gulloa.click/download.json">Release manifest</a>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="#main">
+          <svg viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+            <rect width="96" height="96" rx="22" fill="#081014" />
+            <path
+              d="M48 17C31.4315 17 18 30.4315 18 47C18 63.5685 31.4315 77 48 77C61.0636 77 72.1787 68.6488 76.295 57"
+              stroke="#E7EEF2"
+              stroke-width="7"
+              stroke-linecap="round"
+            />
+            <path d="M32 62L67 27" stroke="#2EE8D6" stroke-width="7" stroke-linecap="round" />
+            <path d="M63 27H69V33" stroke="#2EE8D6" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          Clarus
+        </a>
+        <a class="header-cta" href="#download">Download</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============ Hero ============ -->
+      <section class="hero">
+        <div class="wrap">
+          <svg
+            class="hero-mark"
+            viewBox="0 0 96 96"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            role="img"
+            aria-label="Clarus mark: an incomplete circle completed by a single diagonal line"
+          >
+            <rect width="96" height="96" rx="22" fill="#081014" />
+            <path
+              d="M48 17C31.4315 17 18 30.4315 18 47C18 63.5685 31.4315 77 48 77C61.0636 77 72.1787 68.6488 76.295 57"
+              stroke="#E7EEF2"
+              stroke-width="7"
+              stroke-linecap="round"
+            />
+            <path d="M32 62L67 27" stroke="#2EE8D6" stroke-width="7" stroke-linecap="round" />
+            <path d="M63 27H69V33" stroke="#2EE8D6" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+
+          <span class="eyebrow">Local disk intelligence</span>
+          <h1>Clarus</h1>
+          <p class="hero-lede">
+            Precise local disk intelligence for reviewing optimization candidates before any file
+            operation.
+          </p>
+
+          <div class="hero-actions">
+            <div class="download-region" aria-live="polite">
+              <a
+                class="download-primary"
+                data-download-primary
+                href="https://github.com/gsulloa/clarus/releases/latest"
+              >
+                <span class="download-primary-label" data-download-label
+                  >Download from GitHub Releases</span
+                >
+                <span class="download-primary-meta" data-download-meta
+                  >All platforms, signed &amp; notarized</span
+                >
+              </a>
+              <a class="download-secondary-link" href="#download">See all platforms</a>
+            </div>
+            <p class="status-line" data-download-status role="status"></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Safety model ============ -->
+      <section id="safety" aria-labelledby="safety-heading">
+        <div class="wrap">
+          <div class="section-head">
+            <span class="eyebrow">How Clarus works</span>
+            <h2 id="safety-heading">Evidence before action</h2>
+            <p>
+              Clarus analyzes and explains before it ever touches a file. Every candidate carries a
+              visible reason and a confidence level, and nothing is moved to Trash without your
+              explicit review.
+            </p>
+          </div>
+
+          <ol class="ladder">
+            <li class="ladder-step">
+              <h3>Scan</h3>
+              <p>Clarus reads and classifies the folders you select. No files are changed.</p>
+            </li>
+            <li class="ladder-step">
+              <h3>Explain</h3>
+              <p>
+                Each candidate appears with its type, size, and the specific reason Clarus flagged
+                it — cache, stale build output, or a large file worth a second look.
+              </p>
+            </li>
+            <li class="ladder-step">
+              <h3>Review</h3>
+              <p>
+                You inspect candidates, exclude paths, and decide what to act on. Low-confidence
+                items default to review, not selection.
+              </p>
+            </li>
+            <li class="ladder-step">
+              <h3>Act</h3>
+              <p>
+                Only after review does Clarus move selected items to Trash — never a permanent
+                delete.
+              </p>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ============ Trust / evidence note ============ -->
+      <section id="trust" aria-labelledby="trust-heading">
+        <div class="wrap">
+          <div class="section-head">
+            <span class="eyebrow">Why trust it</span>
+            <h2 id="trust-heading">Built for review, not for trust-me automation</h2>
+          </div>
+
+          <div class="trust-grid">
+            <div class="trust-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M9 12l2 2 4-4" />
+                <circle cx="12" cy="12" r="9" />
+              </svg>
+              <div>
+                <h3>Dry-run first</h3>
+                <p>Scans are read-only. Clarus classifies and estimates recovery before any action exists.</p>
+              </div>
+            </div>
+            <div class="trust-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              <div>
+                <h3>Review before Trash</h3>
+                <p>No candidate is moved without an explicit, scoped confirmation from you.</p>
+              </div>
+            </div>
+            <div class="trust-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <circle cx="6" cy="6" r="3" />
+                <circle cx="6" cy="18" r="3" />
+                <circle cx="18" cy="12" r="3" />
+                <path d="M6 9v6M8.5 7.5L15.5 10.5M8.5 16.5L15.5 13.5" />
+              </svg>
+              <div>
+                <h3>Open source, MIT licensed</h3>
+                <p>The source is public. Inspect what Clarus reads and how it classifies candidates.</p>
+              </div>
+            </div>
+            <div class="trust-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
+                <path d="M9 12l2 2 4-4" />
+              </svg>
+              <div>
+                <h3>Signed &amp; notarized builds</h3>
+                <p>Every release is signed and notarized so your OS can verify it before you run it.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Final download block ============ -->
+      <section id="download" class="download-block" aria-labelledby="download-heading">
+        <div class="wrap">
+          <div class="section-head">
+            <span class="eyebrow">Get Clarus</span>
+            <h2 id="download-heading">Download</h2>
+            <p>Free and open source. Choose your platform below, or let Clarus detect it for you.</p>
+          </div>
+
+          <div class="download-region" aria-live="polite">
+            <a
+              class="download-primary"
+              data-download-primary
+              href="https://github.com/gsulloa/clarus/releases/latest"
+            >
+              <span class="download-primary-label" data-download-label
+                >Download from GitHub Releases</span
+              >
+              <span class="download-primary-meta" data-download-meta
+                >All platforms, signed &amp; notarized</span
+              >
+            </a>
+          </div>
+          <p class="status-line" data-download-status role="status"></p>
+
+          <div class="all-platforms" id="all-platforms" aria-live="polite">
+            <a class="platform-row" href="https://github.com/gsulloa/clarus/releases/latest">
+              <span class="platform-row-label">
+                <span class="platform-row-name">All builds on GitHub Releases</span>
+                <span class="platform-row-filename">macOS (Apple Silicon &amp; Intel), Windows, Linux</span>
+              </span>
+              <span class="platform-row-size">&rarr;</span>
+            </a>
+          </div>
+
+          <p class="mac-arch-note">
+            On macOS, the primary button defaults to the Apple Silicon (<code>arm64</code>) build.
+            Intel Mac users should choose the <code>x86_64</code> build from the list above.
+          </p>
+        </div>
+      </section>
     </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <ul class="footer-links">
+          <li><a href="https://github.com/gsulloa/clarus">GitHub</a></li>
+          <li><a href="https://github.com/gsulloa/clarus/releases/latest">Releases</a></li>
+          <li><a href="https://github.com/gsulloa/clarus/blob/main/LICENSE">MIT License</a></li>
+        </ul>
+        <span class="footer-meta">Version <span data-footer-version>—</span></span>
+      </div>
+    </footer>
+
+    <script src="main.js"></script>
   </body>
 </html>
