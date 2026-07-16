@@ -113,6 +113,11 @@ fn expand(path: &str) -> String {
     }
 }
 
+/// Single-quote a path for safe use in a shell command.
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Run a command through a login shell, capturing stdout+stderr.
 fn run_bash(cmd: &str) -> Result<String, String> {
     let output = Command::new("bash")
@@ -176,91 +181,70 @@ fn size_human(bytes: u64) -> String {
     format!("{value:.decimals$} {}", units[index])
 }
 
-/// Free space on the data volume, GB, matching the script's `df_free`.
-fn disk_free_gb() -> i64 {
-    let output = match Command::new("df")
+/// Disk usage of the data volume, captured from a single `df` snapshot.
+///
+/// `used` is intentionally derived as `total - free`, NOT read from `df`'s
+/// per-volume `Used` column. On APFS, `/System/Volumes/Data` is one volume in a
+/// shared container: the `Used` column reflects only that volume's attributed
+/// usage while `Size` is the whole container and `Avail` is container-wide free
+/// space net of reserved overhead, so `Used + Avail != Size`. Deriving
+/// `used = total - free` guarantees the three figures reconcile
+/// (`used + free = total`) for the readout — do NOT "restore" the column-2 read.
+#[derive(Debug, Clone)]
+struct DiskUsage {
+    free_gb: i64,
+    free_human: String,
+    total_gb: i64,
+    total_human: String,
+    used_gb: i64,
+    used_human: String,
+}
+
+/// Read used/free/total for the data volume from a single `df -g` snapshot.
+///
+/// All figures come from one invocation so they are mutually consistent, and the
+/// human strings are formatted from the same GiB integers so the displayed
+/// values always sum (`used + free = total`). See `DiskUsage` for why `used` is
+/// derived rather than read from `df`'s `Used` column.
+fn disk_usage() -> DiskUsage {
+    // Single snapshot. `-g` reports whole GiB blocks; column order on macOS is
+    // 0=Filesystem, 1=Size, 2=Used, 3=Avail, 4=Capacity.
+    let text = Command::new("df")
         .arg("-g")
         .arg("/System/Volumes/Data")
         .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let field_gb = |index: usize| {
+        parse_df_field_at(&text, index)
+            .and_then(|f| f.parse::<i64>().ok())
+            .unwrap_or(0)
     };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
-        .and_then(|f| f.parse::<i64>().ok())
-        .unwrap_or(0)
+
+    let total_gb = field_gb(1);
+    let free_gb = field_gb(3);
+    let used_gb = (total_gb - free_gb).max(0);
+
+    DiskUsage {
+        free_gb,
+        free_human: gib_human(free_gb),
+        total_gb,
+        total_human: gib_human(total_gb),
+        used_gb,
+        used_human: gib_human(used_gb),
+    }
 }
 
-/// Free space human string, matching the script's `df_free_human`.
-fn disk_free_human() -> String {
-    let output = match Command::new("df")
-        .arg("-h")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return "?".to_string(),
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// Total capacity of the data volume, GB, from the `Size` column.
-fn disk_total_gb() -> i64 {
-    let output = match Command::new("df")
-        .arg("-g")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
-        .and_then(|f| f.parse::<i64>().ok())
-        .unwrap_or(0)
-}
-
-/// Total capacity human string, from the `Size` column.
-fn disk_total_human() -> String {
-    let output = match Command::new("df")
-        .arg("-h")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return "?".to_string(),
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// Used space on the data volume, GB, from the `Used` column.
-fn disk_used_gb() -> i64 {
-    let output = match Command::new("df")
-        .arg("-g")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
-        .and_then(|f| f.parse::<i64>().ok())
-        .unwrap_or(0)
-}
-
-/// Used space human string, from the `Used` column.
-fn disk_used_human() -> String {
-    let output = match Command::new("df")
-        .arg("-h")
-        .arg("/System/Volumes/Data")
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return "?".to_string(),
-    };
-    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
-        .unwrap_or_else(|| "?".to_string())
+/// Format a whole-GiB integer the way `df -h` would (Gi, then Ti past 1024 GiB),
+/// so used/free/total read as a consistent set derived from the same snapshot.
+fn gib_human(gib: i64) -> String {
+    if gib >= 1024 {
+        format!("{:.1}Ti", gib as f64 / 1024.0)
+    } else {
+        format!("{gib}Gi")
+    }
 }
 
 /// `df` output: second line, Nth whitespace field.
@@ -335,6 +319,124 @@ fn tier1(
         command: Some(command),
         status: Status::Available,
         subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// A single-command Tier 3 target: irreplaceable personal data, deletable only
+/// behind the double-confirm. Clears the path's contents (including dotfiles),
+/// tolerating an empty or absent directory.
+fn tier3_simple(id: &'static str, name: &'static str, path: &str) -> Target {
+    let q = sq(&expand(path));
+    let command = format!("rm -rf {q}/* {q}/.[!.]* 2>/dev/null; true");
+    Def {
+        id,
+        name,
+        tier: Tier::Three,
+        path: Some(path.to_string()),
+        reason: "Persistent personal data.",
+        risk_note: "Permanent and irreplaceable — deleting this cannot be undone.",
+        caveat: None,
+        requires_double_confirm: true,
+        command: Some(command),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// A Tier 3 collection target: enumerate the members of `enum_dir` (kept when
+/// `keep` returns true) as individually deletable double-confirm subitems, plus
+/// a top-level group command that removes them all (the "Clean all" button).
+/// Reports NotInstalled when `enum_dir` is absent, Empty when it has no members.
+/// `display_path` is what the UI shows (may differ from `enum_dir`).
+fn tier3_collection(
+    id: &'static str,
+    name: &'static str,
+    display_path: Option<String>,
+    enum_dir: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Target {
+    let expanded_dir = expand(enum_dir);
+    if !std::path::Path::new(&expanded_dir).exists() {
+        return Def {
+            id,
+            name,
+            tier: Tier::Three,
+            path: display_path,
+            reason: "Persistent personal data.",
+            risk_note: "Permanent and irreplaceable — deleting this cannot be undone.",
+            caveat: None,
+            requires_double_confirm: true,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let mut members: Vec<std::path::PathBuf> = std::fs::read_dir(&expanded_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| keep(&n.to_string_lossy()))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    members.sort();
+
+    let mut subitems = Vec::new();
+    for member in &members {
+        let member_str = member.to_string_lossy().to_string();
+        let label = member
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| member_str.clone());
+        subitems.push(Item {
+            id: label.replace('/', "_"),
+            label,
+            path: member_str.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: true,
+            command: format!("rm -rf {}", sq(&member_str)),
+        });
+    }
+
+    // Group command deletes exactly the enumerated members.
+    let group_command = if subitems.is_empty() {
+        None
+    } else {
+        let joined: String = members
+            .iter()
+            .map(|m| sq(&m.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!("rm -rf {joined} 2>/dev/null; true"))
+    };
+
+    Def {
+        id,
+        name,
+        tier: Tier::Three,
+        path: display_path,
+        reason: "Persistent personal data.",
+        risk_note: "Permanent and irreplaceable — deleting this cannot be undone.",
+        caveat: None,
+        requires_double_confirm: true,
+        command: group_command,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
     }
     .into_target()
 }
@@ -523,6 +625,124 @@ pub fn catalog_defs() -> Vec<Target> {
         "rm -rf ~/Library/Application\\ Support/Cursor/CachedExtensionVSIXs".to_string(),
     ));
 
+    targets.push(tier1(
+        "docker-scout",
+        "Docker Scout cache",
+        "~/.docker/scout",
+        "Docker Scout's local CVE and image-analysis database.",
+        None,
+        "rm -rf ~/.docker/scout".to_string(),
+    ));
+
+    targets.push(tier1(
+        "uv-cache",
+        "uv cache",
+        "~/.cache/uv",
+        "The uv Python package manager's download and build cache.",
+        None,
+        "uv cache clean 2>/dev/null || rm -rf ~/.cache/uv/*".to_string(),
+    ));
+
+    targets.push(tier1(
+        "puppeteer-cache",
+        "Puppeteer browsers",
+        "~/.cache/puppeteer",
+        "Chromium/Chrome builds downloaded by Puppeteer.",
+        Some("Re-downloaded next time Puppeteer installs a browser."),
+        "rm -rf ~/.cache/puppeteer/*".to_string(),
+    ));
+
+    targets.push(tier1(
+        "node-gyp",
+        "node-gyp cache",
+        "~/Library/Caches/node-gyp",
+        "Cached Node headers used to compile native addons.",
+        None,
+        "rm -rf ~/Library/Caches/node-gyp/*".to_string(),
+    ));
+
+    targets.push(tier1(
+        "tableplus-cache",
+        "TablePlus cache",
+        "~/Library/Caches/com.tinyapp.TablePlus",
+        "TablePlus's on-disk cache.",
+        None,
+        "rm -rf ~/Library/Caches/com.tinyapp.TablePlus/*".to_string(),
+    ));
+
+    targets.push(tier1(
+        "user-logs",
+        "User application logs",
+        "~/Library/Logs",
+        "Diagnostic logs written by user applications.",
+        Some("Apps recreate logs as they run; only past logs are removed."),
+        "rm -rf ~/Library/Logs/*".to_string(),
+    ));
+
+    targets.push(quicklook_cache_target());
+
+    targets.push(tier1(
+        "vscode-cache",
+        "VS Code cache",
+        "~/Library/Application Support/Code/Cache",
+        "VS Code's HTTP and compiled-data caches.",
+        Some("Also clears VS Code's CachedData."),
+        "rm -rf ~/Library/Application\\ Support/Code/Cache ~/Library/Application\\ Support/Code/CachedData"
+            .to_string(),
+    ));
+
+    targets.push(tier1(
+        "cursor-cache",
+        "Cursor cache",
+        "~/Library/Application Support/Cursor/Cache",
+        "Cursor's HTTP and compiled-data caches.",
+        Some("Also clears Cursor's CachedData; leaves your settings intact."),
+        "rm -rf ~/Library/Application\\ Support/Cursor/Cache ~/Library/Application\\ Support/Cursor/CachedData"
+            .to_string(),
+    ));
+
+    targets.push(electron_cache_target(
+        "discord-cache",
+        "Discord cache",
+        "Discord's HTTP/GPU/service-worker caches.",
+        "~/Library/Application Support/discord",
+    ));
+
+    targets.push(electron_cache_target(
+        "notion-cache",
+        "Notion cache",
+        "Notion's HTTP/GPU/service-worker caches (leaves your Notion data intact).",
+        "~/Library/Application Support/Notion",
+    ));
+
+    targets.push(cache_or_missing(
+        "teams-cache",
+        "Microsoft Teams cache",
+        "Microsoft Teams' sandbox cache.",
+        Some("Clears the app's Caches directory; leaves your data and login intact."),
+        "~/Library/Containers/com.microsoft.teams2/Data/Library/Caches",
+        "rm -rf ~/Library/Containers/com.microsoft.teams2/Data/Library/Caches/*".to_string(),
+    ));
+
+    targets.push(electron_cache_target(
+        "postman-cache",
+        "Postman cache",
+        "Postman's HTTP/GPU/service-worker caches.",
+        "~/Library/Application Support/Postman",
+    ));
+
+    targets.push(cache_or_missing(
+        "zoom-cache",
+        "Zoom cache",
+        "Zoom's on-disk cache.",
+        None,
+        "~/Library/Caches/us.zoom.xos",
+        "rm -rf ~/Library/Caches/us.zoom.xos/*".to_string(),
+    ));
+
+    targets.push(shipit_updaters_target());
+    targets.push(electron_updaters_target());
+
     // ── TIER 2 — regenerables ────────────────────────────────────
     targets.push(docker_prune_target());
     targets.push(docker_raw_target());
@@ -597,63 +817,388 @@ pub fn catalog_defs() -> Vec<Target> {
     targets.push(conductor_target());
     targets.push(android_images_target());
 
-    // ── TIER 3 — persistent data (informational only) ────────────
-    for (id, name, path) in [
-        (
-            "postgres",
-            "PostgreSQL databases",
-            "~/Library/Application Support/Postgres/var-16/base",
-        ),
-        (
-            "spark",
-            "Spark Desktop emails",
-            "~/Library/Application Support/Spark Desktop/core-data",
-        ),
-        (
-            "claude-vm",
-            "Claude VM bundles",
-            "~/Library/Application Support/Claude/vm_bundles",
-        ),
-        (
-            "utm",
-            "UTM Virtual Machines",
-            "~/Library/Containers/com.utmapp.UTM/Data",
-        ),
-        (
-            "whatsapp",
-            "WhatsApp data",
-            "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
-        ),
-        ("notion", "Notion", "~/Library/Application Support/Notion"),
-        ("cursor", "Cursor editor", "~/Library/Application Support/Cursor"),
-        (
-            "chrome-profiles",
-            "Google Chrome profiles",
-            "~/Library/Application Support/Google",
-        ),
-    ] {
-        targets.push(
-            Def {
-                id: Box::leak(id.to_string().into_boxed_str()),
-                name: Box::leak(name.to_string().into_boxed_str()),
-                tier: Tier::Three,
-                path: Some(path.to_string()),
-                reason: "Persistent user data — shown for awareness only.",
-                risk_note: "Requires a manual decision. Clarus never deletes Tier 3 data.",
-                caveat: None,
-                requires_double_confirm: false,
-                command: None,
-                status: Status::Available,
-                subitems: Vec::new(),
-            }
-            .into_target(),
-        );
-    }
+    targets.push(
+        Def {
+            id: "coresimulator-caches",
+            name: "CoreSimulator caches",
+            tier: Tier::Two,
+            path: Some("~/Library/Developer/CoreSimulator/Caches".to_string()),
+            reason: "Cached simulator runtime data and dyld caches.",
+            risk_note: "Regenerable — recreated by Xcode/simulators as needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: Some("rm -rf ~/Library/Developer/CoreSimulator/Caches/*".to_string()),
+            status: Status::Available,
+            subitems: Vec::new(),
+        }
+        .into_target(),
+    );
+
+    targets.push(
+        Def {
+            id: "xcode-devicesupport",
+            name: "Xcode device support",
+            tier: Tier::Two,
+            path: Some("~/Library/Developer/Xcode/iOS DeviceSupport".to_string()),
+            reason: "Symbol data cached per connected iOS/watchOS/tvOS device+OS version.",
+            risk_note: "Regenerable — Xcode recreates it the next time you attach a device.",
+            caveat: Some("Also clears watchOS and tvOS device support."),
+            requires_double_confirm: false,
+            command: Some(
+                "rm -rf ~/Library/Developer/Xcode/iOS\\ DeviceSupport/* ~/Library/Developer/Xcode/watchOS\\ DeviceSupport/* ~/Library/Developer/Xcode/tvOS\\ DeviceSupport/*"
+                    .to_string(),
+            ),
+            status: Status::Available,
+            subitems: Vec::new(),
+        }
+        .into_target(),
+    );
+
+    targets.push(
+        Def {
+            id: "trash",
+            name: "Trash",
+            tier: Tier::Two,
+            path: Some("~/.Trash".to_string()),
+            reason: "Files you have moved to the Trash but not yet emptied.",
+            risk_note: "Permanently deletes everything currently in the Trash.",
+            caveat: Some("Also empties trashes on mounted volumes."),
+            requires_double_confirm: false,
+            command: Some(
+                "rm -rf ~/.Trash/* ~/.Trash/.[!.]* 2>/dev/null; rm -rf /Volumes/*/.Trashes/$(id -u)/* 2>/dev/null; true"
+                    .to_string(),
+            ),
+            status: Status::Available,
+            subitems: Vec::new(),
+        }
+        .into_target(),
+    );
+
+    targets.push(rustup_target());
+
+    // ── TIER 3 — persistent personal data (deletable behind double-confirm) ──
+    targets.push(tier3_simple(
+        "postgres",
+        "PostgreSQL databases",
+        "~/Library/Application Support/Postgres/var-16/base",
+    ));
+    targets.push(tier3_simple(
+        "spark",
+        "Spark Desktop emails",
+        "~/Library/Application Support/Spark Desktop/core-data",
+    ));
+    targets.push(tier3_simple(
+        "whatsapp",
+        "WhatsApp data",
+        "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
+    ));
+    targets.push(tier3_simple("notion", "Notion", "~/Library/Application Support/Notion"));
+    targets.push(tier3_simple("cursor", "Cursor editor", "~/Library/Application Support/Cursor"));
+
+    targets.push(tier3_collection(
+        "downloads",
+        "Downloads",
+        Some("~/Downloads".to_string()),
+        "~/Downloads",
+        |_| true,
+    ));
+    targets.push(tier3_collection(
+        "claude-vm",
+        "Claude VM bundles",
+        Some("~/Library/Application Support/Claude/vm_bundles".to_string()),
+        "~/Library/Application Support/Claude/vm_bundles",
+        |_| true,
+    ));
+    targets.push(tier3_collection(
+        "utm",
+        "UTM Virtual Machines",
+        Some("~/Library/Containers/com.utmapp.UTM/Data".to_string()),
+        "~/Library/Containers/com.utmapp.UTM/Data/Documents",
+        |name| name.ends_with(".utm"),
+    ));
+    targets.push(tier3_collection(
+        "chrome-profiles",
+        "Google Chrome profiles",
+        Some("~/Library/Application Support/Google".to_string()),
+        "~/Library/Application Support/Google/Chrome",
+        |name| {
+            name == "Default"
+                || name == "Guest Profile"
+                || name == "System Profile"
+                || name.starts_with("Profile ")
+        },
+    ));
 
     targets
 }
 
 // ── Container / special target builders ──────────────────────────
+
+/// A single cache directory that may be absent (reports NotInstalled then).
+/// `path` is measured directly; `command` clears it. `path`/`command` are given
+/// unescaped and escaped respectively by the caller as needed.
+fn cache_or_missing(
+    id: &'static str,
+    name: &'static str,
+    reason: &'static str,
+    caveat: Option<&'static str>,
+    path: &str,
+    command: String,
+) -> Target {
+    if !path_exists(path) {
+        return Def {
+            id,
+            name,
+            tier: Tier::One,
+            path: None,
+            reason,
+            risk_note: "Pure cache — regenerated automatically by the owning tool.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+    Def {
+        id,
+        name,
+        tier: Tier::One,
+        path: Some(path.to_string()),
+        reason,
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat,
+        requires_double_confirm: false,
+        command: Some(command),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// An Electron app's HTTP/GPU/service-worker caches under `base` (an Application
+/// Support directory). Reports NotInstalled when `base` is absent, so persistent
+/// user data is never touched. Measures the `Cache` subdir (mirrors slack-cache).
+fn electron_cache_target(
+    id: &'static str,
+    name: &'static str,
+    reason: &'static str,
+    base: &str,
+) -> Target {
+    if !path_exists(base) {
+        return Def {
+            id,
+            name,
+            tier: Tier::One,
+            path: None,
+            reason,
+            risk_note: "Pure cache — regenerated automatically by the owning tool.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+    let esc = base.replace(' ', "\\ ");
+    let command = format!(
+        "rm -rf {esc}/Cache {esc}/Code\\ Cache {esc}/GPUCache {esc}/Service\\ Worker/CacheStorage"
+    );
+    Def {
+        id,
+        name,
+        tier: Tier::One,
+        path: Some(format!("{base}/Cache")),
+        reason,
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat: Some(
+            "Clears HTTP, code, GPU and service-worker caches; leaves your data and login intact.",
+        ),
+        requires_double_confirm: false,
+        command: Some(command),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// Build container subitems for every dir under ~/Library/Caches matching a
+/// predicate on the directory name. Each subitem clears its own contents.
+fn caches_dir_subitems(pred: impl Fn(&str) -> bool) -> Vec<Item> {
+    let caches = format!("{}/Library/Caches", home());
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&caches)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| pred(&n.to_string_lossy()))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    let mut subitems = Vec::new();
+    for dir in &dirs {
+        let dir_str = dir.to_string_lossy().to_string();
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir_str.clone());
+        subitems.push(Item {
+            id: name.clone(),
+            label: name.clone(),
+            path: dir_str.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: false,
+            command: format!("rm -rf '{dir_str}'/*"),
+        });
+    }
+    subitems
+}
+
+/// QuickLook thumbnail cache — lives in the per-user Darwin cache dir.
+fn quicklook_cache_target() -> Target {
+    let cache_dir = run_bash("getconf DARWIN_USER_CACHE_DIR 2>/dev/null")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|d| format!("{d}com.apple.QuickLook.thumbnailcache"));
+    Def {
+        id: "quicklook-cache",
+        name: "QuickLook thumbnails",
+        tier: Tier::One,
+        path: cache_dir,
+        reason: "Cached Finder/QuickLook thumbnail previews.",
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat: Some("Reset via `qlmanage -r cache`; thumbnails rebuild on demand."),
+        requires_double_confirm: false,
+        command: Some(
+            "qlmanage -r cache >/dev/null 2>&1; echo 'QuickLook thumbnail cache reset'".to_string(),
+        ),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// All Squirrel/ShipIt updater caches EXCEPT the ToDesktop one (which has its
+/// own `shipit` entry) — one deletable subitem per app.
+fn shipit_updaters_target() -> Target {
+    let excluded = "com.todesktop.230313mzl4w4u92.ShipIt";
+    let subitems = caches_dir_subitems(|name| name.ends_with(".ShipIt") && name != excluded);
+    Def {
+        id: "shipit-updaters",
+        name: "App updater caches (ShipIt)",
+        tier: Tier::One,
+        path: None,
+        reason: "Leftover installer payloads from Squirrel/ShipIt app auto-updaters.",
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat: Some("Excludes the ToDesktop ShipIt cache, which has its own entry."),
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// electron-updater download caches (`*updater*`, `@*updater*`) — one subitem each.
+fn electron_updaters_target() -> Target {
+    let subitems = caches_dir_subitems(|name| name.to_lowercase().contains("updater"));
+    Def {
+        id: "electron-updaters",
+        name: "App updater downloads (electron-updater)",
+        tier: Tier::One,
+        path: None,
+        reason: "Downloaded update payloads kept by electron-updater apps.",
+        risk_note: "Pure cache — regenerated automatically by the owning tool.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// rustup toolchains — keep the active/default toolchain, offer the rest.
+fn rustup_target() -> Target {
+    if !has_tool("rustup") {
+        return Def {
+            id: "rustup",
+            name: "rustup — old toolchains",
+            tier: Tier::Two,
+            path: None,
+            reason: "Rust toolchains installed via rustup.",
+            risk_note: "Regenerable — reinstall with `rustup toolchain install` if needed.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::ToolMissing,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+    let listing = run_bash("rustup toolchain list 2>/dev/null").unwrap_or_default();
+    let toolchains_dir = format!("{}/.rustup/toolchains", home());
+    let mut subitems = Vec::new();
+    for line in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        // Lines like "stable-... (default)", "... (active, default)", or "1.75.0-...".
+        // The toolchain name is the first token; markers follow in parentheses and
+        // never appear in a toolchain name, so a bare-word check is safe.
+        let is_active =
+            line.contains("default") || line.contains("active") || line.contains("override");
+        if is_active {
+            continue;
+        }
+        let name = line.split_whitespace().next().unwrap_or(line).to_string();
+        let path = format!("{toolchains_dir}/{name}");
+        subitems.push(Item {
+            id: name.clone(),
+            label: name.clone(),
+            path,
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: false,
+            command: format!("rustup toolchain uninstall '{name}'"),
+        });
+    }
+    Def {
+        id: "rustup",
+        name: "rustup — old toolchains",
+        tier: Tier::Two,
+        path: None,
+        reason: "Old Rust toolchains (the active/default toolchain is kept).",
+        risk_note: "Regenerable — reinstall with `rustup toolchain install` if needed.",
+        caveat: None,
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
 
 fn docker_raw_path() -> String {
     format!(
@@ -1514,12 +2059,7 @@ fn measure(target: &mut Target) {
 #[tauri::command]
 pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanupScan, String> {
-        let free_before_gb = disk_free_gb();
-        let free_before_human = disk_free_human();
-        let total_before_gb = disk_total_gb();
-        let total_before_human = disk_total_human();
-        let used_before_gb = disk_used_gb();
-        let used_before_human = disk_used_human();
+        let usage = disk_usage();
 
         let mut targets = catalog_defs();
 
@@ -1541,12 +2081,12 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
         });
 
         Ok(CleanupScan {
-            free_before_gb,
-            free_before_human,
-            total_before_gb,
-            total_before_human,
-            used_before_gb,
-            used_before_human,
+            free_before_gb: usage.free_gb,
+            free_before_human: usage.free_human,
+            total_before_gb: usage.total_gb,
+            total_before_human: usage.total_human,
+            used_before_gb: usage.used_gb,
+            used_before_human: usage.used_human,
             targets,
         })
     })
@@ -1555,34 +2095,30 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
 }
 
 fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
-    let free_gb = disk_free_gb();
-    let free_human = disk_free_human();
-    let total_gb = disk_total_gb();
-    let total_human = disk_total_human();
-    let used_gb = disk_used_gb();
-    let used_human = disk_used_human();
+    let usage = disk_usage();
+    let freed_gb = usage.free_gb - free_before;
     match run {
         Ok(msg) => CleanResult {
             ok: true,
             message: Some(msg),
-            free_gb,
-            free_human,
-            freed_gb: free_gb - free_before,
-            total_gb,
-            total_human,
-            used_gb,
-            used_human,
+            free_gb: usage.free_gb,
+            free_human: usage.free_human,
+            freed_gb,
+            total_gb: usage.total_gb,
+            total_human: usage.total_human,
+            used_gb: usage.used_gb,
+            used_human: usage.used_human,
         },
         Err(msg) => CleanResult {
             ok: false,
             message: Some(msg),
-            free_gb,
-            free_human,
-            freed_gb: free_gb - free_before,
-            total_gb,
-            total_human,
-            used_gb,
-            used_human,
+            free_gb: usage.free_gb,
+            free_human: usage.free_human,
+            freed_gb,
+            total_gb: usage.total_gb,
+            total_human: usage.total_human,
+            used_gb: usage.used_gb,
+            used_human: usage.used_human,
         },
     }
 }
@@ -1590,7 +2126,7 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
 #[tauri::command]
 pub async fn clean_target(id: String, confirmed: bool) -> Result<CleanResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanResult, String> {
-        let free_before = disk_free_gb();
+        let free_before = disk_usage().free_gb;
         let catalog = catalog_defs();
         let target = catalog
             .iter()
@@ -1618,7 +2154,7 @@ pub async fn clean_item(
     confirmed: bool,
 ) -> Result<CleanResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanResult, String> {
-        let free_before = disk_free_gb();
+        let free_before = disk_usage().free_gb;
         let catalog = catalog_defs();
         let target = catalog
             .iter()
@@ -1642,17 +2178,17 @@ pub async fn clean_item(
 
 #[tauri::command]
 pub fn disk_free() -> Result<CleanResult, String> {
-    let free_gb = disk_free_gb();
+    let usage = disk_usage();
     Ok(CleanResult {
         ok: true,
         message: None,
-        free_gb,
-        free_human: disk_free_human(),
+        free_gb: usage.free_gb,
+        free_human: usage.free_human,
         freed_gb: 0,
-        total_gb: disk_total_gb(),
-        total_human: disk_total_human(),
-        used_gb: disk_used_gb(),
-        used_human: disk_used_human(),
+        total_gb: usage.total_gb,
+        total_human: usage.total_human,
+        used_gb: usage.used_gb,
+        used_human: usage.used_human,
     })
 }
 
@@ -1728,5 +2264,111 @@ mod tests {
         // Garbled input degrades to 0 rather than panicking.
         assert_eq!(parse_human_size("abc", "GB"), 0);
         assert_eq!(parse_human_size("4.1", "??"), 0);
+    }
+
+    #[test]
+    fn new_simple_tier1_targets_present() {
+        let targets = catalog_defs();
+        for id in [
+            "docker-scout",
+            "uv-cache",
+            "puppeteer-cache",
+            "node-gyp",
+            "tableplus-cache",
+            "user-logs",
+            "quicklook-cache",
+            "vscode-cache",
+            "cursor-cache",
+            "discord-cache",
+            "notion-cache",
+            "teams-cache",
+            "postman-cache",
+            "zoom-cache",
+        ] {
+            assert_eq!(find(&targets, id).tier, Tier::One, "{id} should be Tier 1");
+        }
+    }
+
+    #[test]
+    fn new_tier2_simple_targets_present() {
+        let targets = catalog_defs();
+        for id in ["coresimulator-caches", "xcode-devicesupport", "trash"] {
+            assert_eq!(find(&targets, id).tier, Tier::Two, "{id} should be Tier 2");
+        }
+        // Trash must not require an in-app double confirmation.
+        assert!(!find(&targets, "trash").requires_double_confirm);
+    }
+
+    #[test]
+    fn new_pattern_containers_have_no_top_level_command() {
+        let targets = catalog_defs();
+        for (id, tier) in [
+            ("shipit-updaters", Tier::One),
+            ("electron-updaters", Tier::One),
+            ("rustup", Tier::Two),
+        ] {
+            let t = find(&targets, id);
+            assert_eq!(t.tier, tier, "{id} tier");
+            assert!(t.command.is_none(), "{id} should act per-subitem only");
+        }
+    }
+
+    #[test]
+    fn shipit_updaters_excludes_todesktop() {
+        let targets = catalog_defs();
+        let t = find(&targets, "shipit-updaters");
+        let excluded = "com.todesktop.230313mzl4w4u92.ShipIt";
+        for item in &t.subitems {
+            assert_ne!(item.id, excluded, "shipit-updaters must not include the todesktop cache");
+            assert!(
+                !item.path.contains(excluded),
+                "shipit-updaters subitem path must not be the todesktop cache"
+            );
+        }
+    }
+
+    #[test]
+    fn downloads_is_tier3_deletable() {
+        let targets = catalog_defs();
+        let d = find(&targets, "downloads");
+        assert_eq!(d.tier, Tier::Three);
+        assert!(
+            d.requires_double_confirm,
+            "downloads must require double confirmation"
+        );
+        // `~/Downloads` always exists on a real machine, but tests must not
+        // depend on the machine's actual contents — only assert the status is
+        // one of the expected outcomes and that any subitems are confirmed.
+        assert!(matches!(d.status, Status::Available | Status::Empty | Status::NotInstalled));
+        for item in &d.subitems {
+            assert!(item.requires_double_confirm, "downloads subitem must require double confirmation");
+        }
+    }
+
+    #[test]
+    fn every_tier3_target_is_deletable_and_confirmed() {
+        let targets = catalog_defs();
+        for id in [
+            "postgres",
+            "spark",
+            "claude-vm",
+            "utm",
+            "whatsapp",
+            "notion",
+            "cursor",
+            "chrome-profiles",
+            "downloads",
+        ] {
+            let t = find(&targets, id);
+            assert_eq!(t.tier, Tier::Three, "{id} should be Tier 3");
+            assert!(t.requires_double_confirm, "{id} must require double confirmation");
+            for item in &t.subitems {
+                assert!(
+                    item.requires_double_confirm,
+                    "{id} subitem `{}` must require double confirmation",
+                    item.id
+                );
+            }
+        }
     }
 }

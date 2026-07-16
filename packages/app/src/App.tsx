@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  CircleSlash,
   Download,
   HardDrive,
   Loader2,
@@ -479,11 +478,6 @@ export function App() {
                 <span>Exact command</span>
                 <code className="command-block">{selected.command}</code>
               </div>
-            ) : selected.tier === "three" ? (
-              <div className="evidence-card warn">
-                <span>Manual only</span>
-                <p>Clarus never deletes Tier 3 data automatically.</p>
-              </div>
             ) : null}
           </>
         ) : (
@@ -541,11 +535,13 @@ function ActionButton({
   disabled,
   danger,
   onClick,
+  label,
 }: {
   action: ActionState | undefined;
   disabled?: boolean;
   danger?: boolean;
   onClick: () => void;
+  label?: string;
 }) {
   const phase = action?.phase ?? "idle";
   if (phase === "cleaning") {
@@ -588,7 +584,7 @@ function ActionButton({
       onClick={onClick}
     >
       <Trash2 size={14} />
-      Clean
+      {label ?? "Clean"}
     </button>
   );
 }
@@ -617,7 +613,6 @@ function TargetRow({
   onCleanItem: (item: CleanupItem) => void;
 }) {
   const isContainer = target.subitems.length > 0;
-  const isTier3 = target.tier === "three";
   const actionable = isTargetActionable(target);
 
   return (
@@ -682,11 +677,14 @@ function TargetRow({
         )}
 
         <div className="target-cta" onClick={(e) => e.stopPropagation()}>
-          {isTier3 ? (
-            <span className="manual-tag">
-              <CircleSlash size={13} />
-              Manual only
-            </span>
+          {isContainer && target.command ? (
+            <ActionButton
+              action={action}
+              disabled={!actionable}
+              danger={target.requiresDoubleConfirm}
+              onClick={onClean}
+              label="Clean all"
+            />
           ) : isContainer ? (
             <span className="manual-tag subtle">Per item</span>
           ) : (
