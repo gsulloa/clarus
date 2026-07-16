@@ -73,6 +73,10 @@ pub struct Target {
 pub struct CleanupScan {
     free_before_gb: i64,
     free_before_human: String,
+    total_before_gb: i64,
+    total_before_human: String,
+    used_before_gb: i64,
+    used_before_human: String,
     targets: Vec<Target>,
 }
 
@@ -84,6 +88,10 @@ pub struct CleanResult {
     free_gb: i64,
     free_human: String,
     freed_gb: i64,
+    total_gb: i64,
+    total_human: String,
+    used_gb: i64,
+    used_human: String,
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -178,7 +186,7 @@ fn disk_free_gb() -> i64 {
         Ok(o) => o,
         Err(_) => return 0,
     };
-    parse_df_field(&String::from_utf8_lossy(&output.stdout))
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
         .and_then(|f| f.parse::<i64>().ok())
         .unwrap_or(0)
 }
@@ -193,14 +201,74 @@ fn disk_free_human() -> String {
         Ok(o) => o,
         Err(_) => return "?".to_string(),
     };
-    parse_df_field(&String::from_utf8_lossy(&output.stdout)).unwrap_or_else(|| "?".to_string())
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 3)
+        .unwrap_or_else(|| "?".to_string())
 }
 
-/// `df` output: second line, 4th field (Avail).
-fn parse_df_field(text: &str) -> Option<String> {
+/// Total capacity of the data volume, GB, from the `Size` column.
+fn disk_total_gb() -> i64 {
+    let output = match Command::new("df")
+        .arg("-g")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Total capacity human string, from the `Size` column.
+fn disk_total_human() -> String {
+    let output = match Command::new("df")
+        .arg("-h")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return "?".to_string(),
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 1)
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Used space on the data volume, GB, from the `Used` column.
+fn disk_used_gb() -> i64 {
+    let output = match Command::new("df")
+        .arg("-g")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
+        .and_then(|f| f.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Used space human string, from the `Used` column.
+fn disk_used_human() -> String {
+    let output = match Command::new("df")
+        .arg("-h")
+        .arg("/System/Volumes/Data")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return "?".to_string(),
+    };
+    parse_df_field_at(&String::from_utf8_lossy(&output.stdout), 2)
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// `df` output: second line, Nth whitespace field.
+/// Column order on macOS: 0=Filesystem, 1=Size, 2=Used, 3=Avail, 4=Capacity.
+fn parse_df_field_at(text: &str, index: usize) -> Option<String> {
     text.lines()
         .nth(1)
-        .and_then(|line| line.split_whitespace().nth(3))
+        .and_then(|line| line.split_whitespace().nth(index))
         .map(|s| s.to_string())
 }
 
@@ -1448,6 +1516,10 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
     tauri::async_runtime::spawn_blocking(move || -> Result<CleanupScan, String> {
         let free_before_gb = disk_free_gb();
         let free_before_human = disk_free_human();
+        let total_before_gb = disk_total_gb();
+        let total_before_human = disk_total_human();
+        let used_before_gb = disk_used_gb();
+        let used_before_human = disk_used_human();
 
         let mut targets = catalog_defs();
 
@@ -1471,6 +1543,10 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
         Ok(CleanupScan {
             free_before_gb,
             free_before_human,
+            total_before_gb,
+            total_before_human,
+            used_before_gb,
+            used_before_human,
             targets,
         })
     })
@@ -1481,6 +1557,10 @@ pub async fn scan_cleanup_targets(app: AppHandle) -> Result<CleanupScan, String>
 fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
     let free_gb = disk_free_gb();
     let free_human = disk_free_human();
+    let total_gb = disk_total_gb();
+    let total_human = disk_total_human();
+    let used_gb = disk_used_gb();
+    let used_human = disk_used_human();
     match run {
         Ok(msg) => CleanResult {
             ok: true,
@@ -1488,6 +1568,10 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
             free_gb,
             free_human,
             freed_gb: free_gb - free_before,
+            total_gb,
+            total_human,
+            used_gb,
+            used_human,
         },
         Err(msg) => CleanResult {
             ok: false,
@@ -1495,6 +1579,10 @@ fn clean_result(run: Result<String, String>, free_before: i64) -> CleanResult {
             free_gb,
             free_human,
             freed_gb: free_gb - free_before,
+            total_gb,
+            total_human,
+            used_gb,
+            used_human,
         },
     }
 }
@@ -1561,6 +1649,10 @@ pub fn disk_free() -> Result<CleanResult, String> {
         free_gb,
         free_human: disk_free_human(),
         freed_gb: 0,
+        total_gb: disk_total_gb(),
+        total_human: disk_total_human(),
+        used_gb: disk_used_gb(),
+        used_human: disk_used_human(),
     })
 }
 
