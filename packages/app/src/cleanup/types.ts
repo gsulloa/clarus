@@ -56,7 +56,7 @@ export type CleanResult = {
 export const TIER_LABELS: Record<Tier, string> = {
   one: "Tier 1 · Caches",
   two: "Tier 2 · Regenerables",
-  three: "Tier 3 · Informational",
+  three: "Tier 3 · Personal data",
 };
 
 export const STATUS_LABELS: Record<Status, string> = {

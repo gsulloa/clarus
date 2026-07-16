@@ -113,6 +113,11 @@ fn expand(path: &str) -> String {
     }
 }
 
+/// Single-quote a path for safe use in a shell command.
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Run a command through a login shell, capturing stdout+stderr.
 fn run_bash(cmd: &str) -> Result<String, String> {
     let output = Command::new("bash")
@@ -314,6 +319,124 @@ fn tier1(
         command: Some(command),
         status: Status::Available,
         subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// A single-command Tier 3 target: irreplaceable personal data, deletable only
+/// behind the double-confirm. Clears the path's contents (including dotfiles),
+/// tolerating an empty or absent directory.
+fn tier3_simple(id: &'static str, name: &'static str, path: &str) -> Target {
+    let q = sq(&expand(path));
+    let command = format!("rm -rf {q}/* {q}/.[!.]* 2>/dev/null; true");
+    Def {
+        id,
+        name,
+        tier: Tier::Three,
+        path: Some(path.to_string()),
+        reason: "Persistent personal data.",
+        risk_note: "Permanent and irreplaceable — deleting this cannot be undone.",
+        caveat: None,
+        requires_double_confirm: true,
+        command: Some(command),
+        status: Status::Available,
+        subitems: Vec::new(),
+    }
+    .into_target()
+}
+
+/// A Tier 3 collection target: enumerate the members of `enum_dir` (kept when
+/// `keep` returns true) as individually deletable double-confirm subitems, plus
+/// a top-level group command that removes them all (the "Clean all" button).
+/// Reports NotInstalled when `enum_dir` is absent, Empty when it has no members.
+/// `display_path` is what the UI shows (may differ from `enum_dir`).
+fn tier3_collection(
+    id: &'static str,
+    name: &'static str,
+    display_path: Option<String>,
+    enum_dir: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Target {
+    let expanded_dir = expand(enum_dir);
+    if !std::path::Path::new(&expanded_dir).exists() {
+        return Def {
+            id,
+            name,
+            tier: Tier::Three,
+            path: display_path,
+            reason: "Persistent personal data.",
+            risk_note: "Permanent and irreplaceable — deleting this cannot be undone.",
+            caveat: None,
+            requires_double_confirm: true,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    let mut members: Vec<std::path::PathBuf> = std::fs::read_dir(&expanded_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| keep(&n.to_string_lossy()))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    members.sort();
+
+    let mut subitems = Vec::new();
+    for member in &members {
+        let member_str = member.to_string_lossy().to_string();
+        let label = member
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| member_str.clone());
+        subitems.push(Item {
+            id: label.replace('/', "_"),
+            label,
+            path: member_str.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: None,
+            requires_double_confirm: true,
+            command: format!("rm -rf {}", sq(&member_str)),
+        });
+    }
+
+    // Group command deletes exactly the enumerated members.
+    let group_command = if subitems.is_empty() {
+        None
+    } else {
+        let joined: String = members
+            .iter()
+            .map(|m| sq(&m.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!("rm -rf {joined} 2>/dev/null; true"))
+    };
+
+    Def {
+        id,
+        name,
+        tier: Tier::Three,
+        path: display_path,
+        reason: "Persistent personal data.",
+        risk_note: "Permanent and irreplaceable — deleting this cannot be undone.",
+        caveat: None,
+        requires_double_confirm: true,
+        command: group_command,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
     }
     .into_target()
 }
@@ -753,59 +876,58 @@ pub fn catalog_defs() -> Vec<Target> {
 
     targets.push(rustup_target());
 
-    // ── TIER 3 — persistent data (informational only) ────────────
-    for (id, name, path) in [
-        (
-            "postgres",
-            "PostgreSQL databases",
-            "~/Library/Application Support/Postgres/var-16/base",
-        ),
-        (
-            "spark",
-            "Spark Desktop emails",
-            "~/Library/Application Support/Spark Desktop/core-data",
-        ),
-        (
-            "claude-vm",
-            "Claude VM bundles",
-            "~/Library/Application Support/Claude/vm_bundles",
-        ),
-        (
-            "utm",
-            "UTM Virtual Machines",
-            "~/Library/Containers/com.utmapp.UTM/Data",
-        ),
-        (
-            "whatsapp",
-            "WhatsApp data",
-            "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
-        ),
-        ("notion", "Notion", "~/Library/Application Support/Notion"),
-        ("cursor", "Cursor editor", "~/Library/Application Support/Cursor"),
-        (
-            "chrome-profiles",
-            "Google Chrome profiles",
-            "~/Library/Application Support/Google",
-        ),
-        ("downloads", "Downloads", "~/Downloads"),
-    ] {
-        targets.push(
-            Def {
-                id: Box::leak(id.to_string().into_boxed_str()),
-                name: Box::leak(name.to_string().into_boxed_str()),
-                tier: Tier::Three,
-                path: Some(path.to_string()),
-                reason: "Persistent user data — shown for awareness only.",
-                risk_note: "Requires a manual decision. Clarus never deletes Tier 3 data.",
-                caveat: None,
-                requires_double_confirm: false,
-                command: None,
-                status: Status::Available,
-                subitems: Vec::new(),
-            }
-            .into_target(),
-        );
-    }
+    // ── TIER 3 — persistent personal data (deletable behind double-confirm) ──
+    targets.push(tier3_simple(
+        "postgres",
+        "PostgreSQL databases",
+        "~/Library/Application Support/Postgres/var-16/base",
+    ));
+    targets.push(tier3_simple(
+        "spark",
+        "Spark Desktop emails",
+        "~/Library/Application Support/Spark Desktop/core-data",
+    ));
+    targets.push(tier3_simple(
+        "whatsapp",
+        "WhatsApp data",
+        "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
+    ));
+    targets.push(tier3_simple("notion", "Notion", "~/Library/Application Support/Notion"));
+    targets.push(tier3_simple("cursor", "Cursor editor", "~/Library/Application Support/Cursor"));
+
+    targets.push(tier3_collection(
+        "downloads",
+        "Downloads",
+        Some("~/Downloads".to_string()),
+        "~/Downloads",
+        |_| true,
+    ));
+    targets.push(tier3_collection(
+        "claude-vm",
+        "Claude VM bundles",
+        Some("~/Library/Application Support/Claude/vm_bundles".to_string()),
+        "~/Library/Application Support/Claude/vm_bundles",
+        |_| true,
+    ));
+    targets.push(tier3_collection(
+        "utm",
+        "UTM Virtual Machines",
+        Some("~/Library/Containers/com.utmapp.UTM/Data".to_string()),
+        "~/Library/Containers/com.utmapp.UTM/Data/Documents",
+        |name| name.ends_with(".utm"),
+    ));
+    targets.push(tier3_collection(
+        "chrome-profiles",
+        "Google Chrome profiles",
+        Some("~/Library/Application Support/Google".to_string()),
+        "~/Library/Application Support/Google/Chrome",
+        |name| {
+            name == "Default"
+                || name == "Guest Profile"
+                || name == "System Profile"
+                || name.starts_with("Profile ")
+        },
+    ));
 
     targets
 }
@@ -2206,10 +2328,47 @@ mod tests {
     }
 
     #[test]
-    fn downloads_is_tier3_informational() {
+    fn downloads_is_tier3_deletable() {
         let targets = catalog_defs();
         let d = find(&targets, "downloads");
         assert_eq!(d.tier, Tier::Three);
-        assert!(d.command.is_none(), "downloads must have no cleanup command");
+        assert!(
+            d.requires_double_confirm,
+            "downloads must require double confirmation"
+        );
+        // `~/Downloads` always exists on a real machine, but tests must not
+        // depend on the machine's actual contents — only assert the status is
+        // one of the expected outcomes and that any subitems are confirmed.
+        assert!(matches!(d.status, Status::Available | Status::Empty | Status::NotInstalled));
+        for item in &d.subitems {
+            assert!(item.requires_double_confirm, "downloads subitem must require double confirmation");
+        }
+    }
+
+    #[test]
+    fn every_tier3_target_is_deletable_and_confirmed() {
+        let targets = catalog_defs();
+        for id in [
+            "postgres",
+            "spark",
+            "claude-vm",
+            "utm",
+            "whatsapp",
+            "notion",
+            "cursor",
+            "chrome-profiles",
+            "downloads",
+        ] {
+            let t = find(&targets, id);
+            assert_eq!(t.tier, Tier::Three, "{id} should be Tier 3");
+            assert!(t.requires_double_confirm, "{id} must require double confirmation");
+            for item in &t.subitems {
+                assert!(
+                    item.requires_double_confirm,
+                    "{id} subitem `{}` must require double confirmation",
+                    item.id
+                );
+            }
+        }
     }
 }
