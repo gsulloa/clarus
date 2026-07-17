@@ -680,6 +680,7 @@ pub fn catalog_defs() -> Vec<Target> {
     ));
 
     targets.push(quicklook_cache_target());
+    targets.push(system_temp_target());
 
     targets.push(tier1(
         "vscode-cache",
@@ -814,6 +815,7 @@ pub fn catalog_defs() -> Vec<Target> {
     );
 
     targets.push(conductor_artifacts_target());
+    targets.push(project_artifacts_target());
     targets.push(conductor_target());
     targets.push(android_images_target());
 
@@ -1943,6 +1945,268 @@ fn conductor_artifacts_target() -> Target {
                  (node_modules, .next, dist, target, cdk.out, …).",
         risk_note: "Fully regenerable — reinstall/rebuild to recreate.",
         caveat: Some("Freed space shown in the disk meter after cleaning."),
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+// ── Project build artifacts (repos under conventional dev roots) ──
+
+/// Conventional directory names (relative to $HOME) where developers keep repos.
+/// Probed for existence — we never assume a specific personal path is present.
+const DEV_ROOT_CANDIDATES: &[&str] = &[
+    "dev", "Developer", "Projects", "src", "code", "repos", "work", "git", "workspace",
+];
+
+/// Existing dev-root directories: {home}/{candidate} that actually exist.
+fn existing_dev_roots() -> Vec<std::path::PathBuf> {
+    let home = home();
+    let mut roots = Vec::new();
+    for name in DEV_ROOT_CANDIDATES {
+        let p = std::path::PathBuf::from(format!("{home}/{name}"));
+        if p.is_dir() {
+            roots.push(p);
+        }
+    }
+    roots
+}
+
+/// Recursively find git repositories (dirs containing a `.git` entry) under
+/// `root`, up to `max_depth` levels deep. Descent stops at the first `.git`
+/// hit (nested submodules are not listed separately). Symlinks are never
+/// followed, and anything under ~/conductor/workspaces is skipped (already
+/// covered by the Conductor artifact target).
+fn enumerate_git_repos(root: &std::path::Path, max_depth: usize) -> Vec<std::path::PathBuf> {
+    let conductor = format!("{}/conductor/workspaces", home());
+    let mut out = Vec::new();
+    collect_git_repos(root, max_depth, &conductor, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_git_repos(
+    dir: &std::path::Path,
+    depth_left: usize,
+    conductor_excl: &str,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    // Skip the Conductor workspaces subtree — handled by conductor-artifacts.
+    if dir.to_string_lossy().starts_with(conductor_excl) {
+        return;
+    }
+    // A directory containing `.git` is a repo; record it and don't descend.
+    if dir.join(".git").exists() {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if depth_left == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        // Directories only, never following symlinks.
+        .filter(|p| {
+            std::fs::symlink_metadata(p)
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false)
+        })
+        .collect();
+    children.sort();
+    for child in children {
+        collect_git_repos(&child, depth_left - 1, conductor_excl, out);
+    }
+}
+
+/// Project build artifacts — regenerable dirs (node_modules, .next, dist, …)
+/// inside git repos discovered under conventional dev roots.
+fn project_artifacts_target() -> Target {
+    let roots = existing_dev_roots();
+    if roots.is_empty() {
+        return Def {
+            id: "project-artifacts",
+            name: "Project build artifacts",
+            tier: Tier::One,
+            path: None,
+            reason: "Build outputs and dependency dirs inside your project repos.",
+            risk_note: "Fully regenerable — reinstall/rebuild to recreate.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    }
+
+    // Discover repos under each root (bounded depth 3), de-duplicated.
+    let mut repos: Vec<std::path::PathBuf> = Vec::new();
+    for root in &roots {
+        for repo in enumerate_git_repos(root, 3) {
+            if !repos.contains(&repo) {
+                repos.push(repo);
+            }
+        }
+    }
+    repos.sort();
+
+    let mut subitems = Vec::new();
+    for repo in &repos {
+        let repo_str = repo.to_string_lossy().to_string();
+        let name = repo
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| repo_str.clone());
+        let parent = repo
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let label = if parent.is_empty() {
+            name.clone()
+        } else {
+            format!("{parent}/{name}")
+        };
+        // Full-path-derived id guarantees uniqueness across roots.
+        let id = format!(
+            "project__{}",
+            repo_str
+                .trim_start_matches('/')
+                .replace(|c: char| !c.is_alphanumeric(), "_")
+        );
+        subitems.push(Item {
+            id,
+            label,
+            // Empty path: don't du the whole repo (would misrepresent artifact size).
+            path: String::new(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: Some("node_modules · .next · dist · target · cdk.out · …".to_string()),
+            requires_double_confirm: false,
+            command: artifact_clean_cmd(&repo_str),
+        });
+    }
+
+    Def {
+        id: "project-artifacts",
+        name: "Project build artifacts",
+        tier: Tier::One,
+        path: None,
+        reason: "Build outputs and dependency dirs inside your project repos \
+                 (node_modules, .next, dist, target, cdk.out, …).",
+        risk_note: "Fully regenerable — reinstall/rebuild to recreate.",
+        caveat: Some(
+            "Found in git repos under ~/dev, ~/Projects, ~/src, …; Conductor \
+             workspaces are handled separately.",
+        ),
+        requires_double_confirm: false,
+        command: None,
+        status: if subitems.is_empty() {
+            Status::Empty
+        } else {
+            Status::Available
+        },
+        subitems,
+    }
+    .into_target()
+}
+
+/// Number of days a top-level `T/` entry must be untouched before it is
+/// considered stale and eligible for removal.
+const TEMP_STALE_DAYS: u32 = 3;
+
+/// System temporary files — stale entries under the per-user Darwin temp dir
+/// plus orphaned Chrome code-sign clones. The path is resolved via `getconf`
+/// so the per-user `/private/var/folders/<hash>` segment is never hardcoded.
+fn system_temp_target() -> Target {
+    let temp_dir = run_bash("getconf DARWIN_USER_TEMP_DIR 2>/dev/null")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string());
+
+    let Some(temp_dir) = temp_dir else {
+        return Def {
+            id: "system-temp",
+            name: "System temporary files",
+            tier: Tier::One,
+            path: None,
+            reason: "Stale temporary files left under the per-user system temp directory.",
+            risk_note: "Temporary — regenerated on demand.",
+            caveat: None,
+            requires_double_confirm: false,
+            command: None,
+            status: Status::NotInstalled,
+            subitems: Vec::new(),
+        }
+        .into_target();
+    };
+
+    // X/ is a sibling of T/ (both under the per-user folder).
+    let base = std::path::Path::new(&temp_dir)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let chrome_clones = format!("{base}/X/com.google.Chrome.code_sign_clone");
+
+    let mut subitems = Vec::new();
+
+    // Stale temp files — age-gated so temp files in use are never touched.
+    subitems.push(Item {
+        id: "stale-temp".to_string(),
+        label: format!("Stale temp files (untouched >{TEMP_STALE_DAYS} days)"),
+        // Empty path: only the stale subset is removed, so a du of T/ would mislead.
+        path: String::new(),
+        size_bytes: 0,
+        size_human: String::new(),
+        meta: Some("cdk-nextjs-archive · DockerDesktop temp · …".to_string()),
+        requires_double_confirm: false,
+        command: format!(
+            "find {} -mindepth 1 -maxdepth 1 -mtime +{} -exec rm -rf {{}} + 2>/dev/null; true",
+            sq(&temp_dir),
+            TEMP_STALE_DAYS
+        ),
+    });
+
+    // Orphaned Chrome code-sign clones — measurable; quit Chrome first.
+    if std::path::Path::new(&chrome_clones).exists() {
+        subitems.push(Item {
+            id: "chrome-code-sign-clones".to_string(),
+            label: "Chrome code-sign clones".to_string(),
+            path: chrome_clones.clone(),
+            size_bytes: 0,
+            size_human: String::new(),
+            meta: Some("Quits Google Chrome first".to_string()),
+            requires_double_confirm: false,
+            command: format!(
+                "osascript -e 'quit app \"Google Chrome\"' 2>/dev/null; sleep 1; rm -rf {}",
+                sq(&chrome_clones)
+            ),
+        });
+    }
+
+    Def {
+        id: "system-temp",
+        name: "System temporary files",
+        tier: Tier::One,
+        path: None,
+        reason: "Stale temporary files under the per-user system temp directory \
+                 (build archives, updater payloads, orphaned Chrome clones).",
+        risk_note: "Temporary — regenerated on demand.",
+        caveat: Some(
+            "Only entries untouched for over 3 days are removed, so files in use \
+             by running apps are left alone.",
+        ),
         requires_double_confirm: false,
         command: None,
         status: if subitems.is_empty() {
