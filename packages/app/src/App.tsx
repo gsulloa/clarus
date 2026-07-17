@@ -21,6 +21,7 @@ import {
   onTargetMeasured,
   scanCleanupTargets,
 } from "./cleanup/api";
+import { sortTargets } from "./cleanup/sort";
 import {
   isTargetActionable,
   STATUS_LABELS,
@@ -501,13 +502,6 @@ export function App() {
       ) : null}
     </main>
   );
-}
-
-function sortTargets(list: CleanupTarget[]): CleanupTarget[] {
-  const rank: Record<Tier, number> = { one: 0, two: 1, three: 2 };
-  return list
-    .slice()
-    .sort((a, b) => rank[a.tier] - rank[b.tier] || a.name.localeCompare(b.name));
 }
 
 function Elapsed({ startedAt }: { startedAt: number }) {
