@@ -1,6 +1,6 @@
 [package]
 name = "clarus"
-version = "0.7.0"
+version = "0.7.1"
 description = "A precise Tauri desktop advisor for understanding and safely optimizing local disk usage."
 authors = ["Gabriel Ulloa <gabriel.ulloa.e@gmail.com>"]
 license = "MIT"
