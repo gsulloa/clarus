@@ -32,10 +32,16 @@
   box-sizing: border-box;
 }
 
+html,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   min-width: 1024px;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   background: var(--bg-base);
 }
 
@@ -67,7 +73,9 @@ button:disabled {
 .app-shell {
   display: grid;
   grid-template-columns: 288px minmax(520px, 1fr) 340px;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 .control-rail {
@@ -76,12 +84,16 @@ button:disabled {
   border-right: 1px solid var(--border);
   background: var(--bg-deep);
   padding: 24px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .evidence-panel {
   border-left: 1px solid var(--border);
   background: var(--bg-deep);
   padding: 24px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .brand-lockup {
@@ -244,6 +256,7 @@ h3 {
 /* Center surface */
 .intelligence-surface {
   padding: 30px;
+  min-height: 0;
   overflow-y: auto;
 }
 
